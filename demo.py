@@ -1,9 +1,5 @@
-from __future__ import annotations
-
 import asyncio
-
 from pydantic import BaseModel
-
 from fastevents import FastEvents, InMemoryBus, RuntimeEvent
 
 

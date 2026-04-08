@@ -1,21 +1,25 @@
 ## FastEvents
 
-`FastEvents` is a lightweight, general-purpose asyncio event bus for Python applications, with a clear event model, a small runtime, and an extensible bus abstraction.
+`FastEvents` is a lightweight, general-purpose Python `asyncio` event bus with a clear event model, a small runtime, and an extensible bus abstraction.
 
-It is organized around a few core concepts while keeping an authoring experience closer to FastAPI-style declaration and a more ergonomic API surface:
+With just a few lines of code, you can try event-driven programming directly in Python:
 
-- `FastEvents` / `app`: declaration and subscriber registration
-- `Dispatcher`: subscription matching, layered propagation, and dispatch
-- `Bus`: runtime delivery, lifecycle, and event entry points
-- an API centered on decorator-based handlers, minimal parameter injection, and explicit runtime capabilities
-- an abstract `Bus` contract that can be extended beyond the in-memory implementation
+```python
+from fastevents import FastEvents, RuntimeEvent
+
+app = FastEvents()
+
+@app.on("hello")
+async def hello(event: RuntimeEvent) -> None:
+    print("hello world")
+```
 
 The current implementation targets Python `3.12+` and ships with an in-memory bus.
 
 ## Install
 
 ```bash
-uv add fastevents
+uv add https://github.com/t4wefan/FastEvents.git
 ```
 
 Or for local development:
@@ -26,34 +30,39 @@ uv sync
 
 ## Quick Start
 
+First define an app and register an event handler:
+
 ```python
-from __future__ import annotations
-
 import asyncio
-
 from fastevents import FastEvents, InMemoryBus, RuntimeEvent
 
-
 app = FastEvents()
+
+@app.on("hello")
+async def hello(event: RuntimeEvent) -> None:
+    print("hello world")
+```
+
+Then start the bus and publish an event:
+
+```python
 bus = InMemoryBus()
-
-
-@app.on("user.lookup")
-async def lookup(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.reply(payload={"user_id": payload["user_id"], "name": "Alice"})
-
 
 async def main() -> None:
     await bus.astart(app)
     try:
-        reply = await app.request(tags="user.lookup", payload={"user_id": 7}, timeout=1)
-        print(reply.payload)
+        await bus.publish(tags="hello")
     finally:
         await bus.astop()
 
-
 asyncio.run(main())
 ```
+
+That is the basic usage model:
+
+- create an app with `FastEvents()`
+- register handlers with `@app.on(...)`
+- start the runtime with `InMemoryBus()` and publish events
 
 ## Core Model
 
@@ -69,7 +78,7 @@ app = FastEvents()
 bus = InMemoryBus()
 ```
 
-Register subscribers with `@app.on(...)`. Temporary listening and single-reply requests are then available through `app.listen()` and `app.request()` once the bus is running.
+Register subscribers with `@app.on(...)`. Temporary listening and single requests are then available through `app.listen()` and `app.request()`.
 
 ## Event Model
 
@@ -91,7 +100,7 @@ Examples:
 
 ## Subscription DSL
 
-Subscriptions support a compact tag DSL:
+Subscriptions support a compact tag DSL for combining multiple tags with simple logic:
 
 - `"order.created"`: match a single tag
 - `("order.submitted", "vip")`: all patterns in the tuple must match
@@ -119,7 +128,7 @@ async def handle_ops(event: RuntimeEvent) -> None:
 
 ## Levels and Propagation
 
-`level` is the main propagation control mechanism.
+We use `level` to control how events move across handlers.
 
 - `level < 0`: observation-only layers
 - `level >= 0`: handling and fallback layers
@@ -133,6 +142,8 @@ Propagation rules:
 - if any subscriber in a non-negative level returns `consumed=True`, higher levels do not run
 - if all subscribers in a non-negative level return `consumed=False`, propagation continues upward
 
+Default handler registration uses `level=0`.
+
 Typical convention:
 
 - `-1`: audit, tracing, metrics, passive observers
@@ -141,13 +152,13 @@ Typical convention:
 
 ## Handler Injection
 
-The current v0 injection model is intentionally minimal.
+FastEvents supports automatic injection for common handler parameters. You declare them with type annotations, and the framework provides the current event or payload.
 
-Supported handler parameters:
+Typical forms are:
 
-- one event parameter annotated as `RuntimeEvent` or `StandardEvent`
-- one payload parameter annotated as `dict`
-- one payload parameter annotated as a `pydantic.BaseModel` subclass
+- use `RuntimeEvent` to access the current event
+- use `dict` to access the raw payload
+- use a `pydantic.BaseModel` subclass to receive validated structured data
 
 Examples:
 
@@ -175,14 +186,11 @@ async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
     ...
 ```
 
-Recoverable payload mismatches can fall through to a higher-level handler.
+If payload validation fails for a `pydantic` model, the current handler is treated as having declined the event, and a higher-level handler can still run.
 
 ## Fallback with `SessionNotConsumed`
 
-For non-negative handler subscribers, raising `SessionNotConsumed` means:
-
-- this subscriber declines to claim the event
-- higher levels may still run
+If a handler wants to explicitly give up processing, it can raise `SessionNotConsumed`. The event will then continue to a higher `level`, which makes fallback handlers straightforward to express.
 
 Example:
 
@@ -203,9 +211,9 @@ async def fallback(event: RuntimeEvent, payload: dict) -> None:
 
 ## RuntimeEvent and `ctx`
 
-Subscribers receive a runtime event view. The runtime capability surface lives on `event.ctx`.
+Inside a handler, if you need to keep talking to the bus - for example by publishing a follow-up event or replying to a request - use `event.ctx`.
 
-Current runtime methods:
+The two most common methods are:
 
 - `await event.ctx.publish(...)`
 - `await event.ctx.reply(...)`
@@ -235,7 +243,7 @@ async def handle(event: RuntimeEvent, payload: dict) -> None:
 
 ## Bus Lifecycle
 
-Start and stop the bus explicitly:
+The bus can be started asynchronously:
 
 ```python
 await bus.astart(app)
@@ -245,7 +253,7 @@ finally:
     await bus.astop()
 ```
 
-Or from synchronous code:
+From synchronous code, you can also use:
 
 ```python
 bus.start(app)
@@ -255,9 +263,9 @@ finally:
     bus.stop()
 ```
 
-There is also `bus.run(app)` for a blocking runtime loop.
+There is also `bus.run(app)` for a blocking runtime loop. In practice, that means the bus takes over the main thread until it stops.
 
-Before start, `publish()` raises `BusNotStartedError`. `listen()` and `request()` also raise it if the app is not bound to a running bus.
+Before start, calling `publish()`, or calling `listen()` / `request()` before the app is bound to a running bus, raises `BusNotStartedError`.
 
 ## Publish
 
@@ -265,15 +273,7 @@ Before start, `publish()` raises `BusNotStartedError`. `listen()` and `request()
 await bus.publish(tags="order.created", payload={"order_id": 1})
 ```
 
-Important semantic note: `publish()` only guarantees that the event has been created and accepted by the bus send boundary.
-
-It does not guarantee that:
-
-- dispatch already finished
-- subscribers already succeeded
-- a later reply already exists
-
-That boundary is deliberate and matches the current RFC.
+`publish()` sends an event, but it only guarantees that the event has been created and accepted by the bus.
 
 ## Listen
 
@@ -285,16 +285,11 @@ async with app.listen("notification.sent", level=-1) as stream:
         print(event.payload)
 ```
 
-Useful for:
-
-- temporary observation tools
-- UI streams
-- tests and demos
-- internal request/reply plumbing
+This is useful when you want to observe a class of events at runtime without turning it into a permanent handler.
 
 ## Request / Reply
 
-`request()` lives on `app` and is the standard single-reply API. Internally it follows this flow:
+`request()` lives on `app` and is the standard single-reply API. Internally it works in this order:
 
 - generate random `reply_tags`
 - register a temporary listener for replies
@@ -309,14 +304,6 @@ reply = await app.request(
 )
 ```
 
-Flow:
-
-1. create a temporary reply subscriber
-2. register it
-3. publish the request event
-4. wait for the first matching reply
-5. always clean up the temporary subscriber
-
 Reserved metadata keys:
 
 - `reply_tags`
@@ -328,8 +315,7 @@ If no reply arrives before the timeout, `RequestTimeoutError` is raised.
 
 ## Examples
 
-- `python main.py`: smoke-style end-to-end example
-- `python demo.py`: layered order workflow demo
-- `python ai_api_demo.py`: run the FastAPI demo service
+- `python demo.py`: simple streaming terminal demo
+- `python listen_request_demo.py`: minimal `listen()` / `request()` demo
 
-For implementation details and design rationale, see `rfc.md`.
+For implementation details and design rationale, see `docs/rfc.md`.
