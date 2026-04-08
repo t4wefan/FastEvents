@@ -258,6 +258,7 @@ finally:
 ```
 
 另外还提供 `bus.run(app)` 这种阻塞式运行方式。这意味着 bus 会占用整个主线程，这之后的代码将不会运行。
+一般来说，如果你不手动 stop，在脚本退出时也会自动回收。
 
 在启动前调用 `publish()`，或者在 app 尚未绑定运行时 bus 时调用 `listen()`、`request()`，都会抛出 `BusNotStartedError`。
 
