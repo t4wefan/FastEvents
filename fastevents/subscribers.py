@@ -178,6 +178,16 @@ class EventStream(AsyncIterator[RuntimeEvent]):
             raise StopAsyncIteration
         return item
 
+    async def get(self) -> RuntimeEvent:
+        """Receive the next event from the stream."""
+
+        return await self.__anext__()
+
+    async def recv(self) -> RuntimeEvent:
+        """Alias for ``get()`` with message-stream style naming."""
+
+        return await self.get()
+
     async def close(self) -> None:
         if self._closed:
             return

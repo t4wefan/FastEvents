@@ -7,13 +7,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
-from uuid import uuid4
 
 from .app import FastEvents
 from .dispatcher import DispatcherSnapshot
-from .events import RuntimeEvent, StandardEvent, new_event
-from .exceptions import BusAlreadyStartedError, BusNotStartedError, RequestTimeoutError
-from .subscribers import EventStream, StreamSubscriber
+from .events import StandardEvent, new_event
+from .exceptions import BusAlreadyStartedError, BusNotStartedError
+from .subscribers import EventStream
 from .subscription import SubscriptionInput, TagInput, normalize_tags
 
 
@@ -66,6 +65,7 @@ class Bus(ABC):
         *,
         tags: TagInput,
         payload: Any = None,
+        reply_tags: TagInput | None = None,
         meta: dict[str, object] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -168,6 +168,7 @@ class InMemoryBus(Bus):
         self._worker_task = None
         self._pending_startup_event = startup_event
         self._app.dispatcher.bind_runtime_publisher(self)
+        self._app._bind_runtime_bus(self)  # type: ignore[attr-defined]
 
     async def astart(self, app: FastEvents, *, startup_event: StandardEvent | None = None) -> None:
         """Async startup that prepares queue/worker and flushes startup event."""
@@ -219,12 +220,15 @@ class InMemoryBus(Bus):
         self._stopping = False
         self._loop = None
         self._loop_thread_id = None
+        if self._app is not None:
+            self._app._bind_runtime_bus(None)  # type: ignore[attr-defined]
 
     async def publish(
         self,
         *,
         tags: TagInput,
         payload=None,
+        reply_tags: TagInput | None = None,
         meta: dict[str, object] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -232,7 +236,10 @@ class InMemoryBus(Bus):
         """Create a new event and enqueue it for runtime admission."""
         await self._ensure_runtime_ready()
         self._ensure_publish_allowed()
-        event = new_event(tags=tags, payload=payload, meta=meta, id=id, timestamp=timestamp)
+        event_meta = dict(meta or {})
+        if reply_tags is not None:
+            event_meta["reply_tags"] = normalize_tags(reply_tags)
+        event = new_event(tags=tags, payload=payload, meta=event_meta, id=id, timestamp=timestamp)
         await self.send(event)
         return event
 
@@ -246,27 +253,9 @@ class InMemoryBus(Bus):
         maxsize: int = 0,
     ) -> AsyncIterator[EventStream]:
         """Register a temporary stream subscriber and yield its event stream."""
-        await self._ensure_runtime_ready()
-        self._ensure_started()
         app = self._require_app()
-        subscriber = StreamSubscriber(
-            id=uuid4().hex,
-            subscription=subscription,
-            level=level,
-            name=name,
-            maxsize=maxsize,
-        )
-        app.dispatcher.add_subscriber(subscriber)
-
-        async def cleanup() -> None:
-            await subscriber.close()
-            app.dispatcher.remove_subscriber(subscriber.id)
-
-        stream = subscriber.stream(cleanup)
-        try:
+        async with app.listen(subscription, level=level, name=name, maxsize=maxsize) as stream:
             yield stream
-        finally:
-            await stream.close()
 
     async def request(
         self,
@@ -278,51 +267,8 @@ class InMemoryBus(Bus):
         level: int = 0,
     ) -> StandardEvent:
         """Create a temporary reply subscriber and await the first reply event."""
-        await self._ensure_runtime_ready()
-        self._ensure_started()
         app = self._require_app()
-        correlation_id = uuid4().hex
-        reply_tags = normalize_tags(("reply", correlation_id))
-        request_meta = dict(meta or {})
-        request_meta["reply_tags"] = reply_tags
-        request_meta["correlation_id"] = correlation_id
-
-        def predicate(event):
-            return event.meta.get("correlation_id") == correlation_id
-        subscriber = StreamSubscriber(
-            id=uuid4().hex,
-            subscription=reply_tags,
-            level=level,
-            name="request-reply-listener",
-            extra_predicate=predicate,
-        )
-        app.dispatcher.add_subscriber(subscriber)
-
-        async def cleanup() -> None:
-            await subscriber.close()
-            app.dispatcher.remove_subscriber(subscriber.id)
-
-        stream = subscriber.stream(cleanup)
-        try:
-            await self.publish(tags=tags, payload=payload, meta=request_meta)
-            waiter = stream.__anext__()
-            try:
-                reply_event: RuntimeEvent
-                if timeout is None:
-                    reply_event = await waiter
-                else:
-                    reply_event = await asyncio.wait_for(waiter, timeout=timeout)
-                return StandardEvent(
-                    id=reply_event.id,
-                    timestamp=reply_event.timestamp,
-                    tags=reply_event.tags,
-                    meta=reply_event.meta,
-                    payload=reply_event.payload,
-                )
-            except TimeoutError as exc:
-                raise RequestTimeoutError("request timed out") from exc
-        finally:
-            await stream.close()
+        return await app.request(tags=tags, payload=payload, meta=meta, timeout=timeout, level=level)
 
     async def send(self, event: StandardEvent) -> None:
         """Enqueue an already-built event into the in-memory admission queue."""

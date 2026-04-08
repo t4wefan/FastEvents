@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 
 from pydantic import BaseModel
 
@@ -51,12 +50,11 @@ async def render_token(event: RuntimeEvent, payload: Token) -> None:
 
 async def run_prompt(session_id: str, prompt: str) -> None:
     line(f"\n> user: {prompt}")
-    async with bus.listen("chat.done", level=-1) as stream:
+    async with app.listen("chat.done", level=-1) as stream:
         await bus.publish(tags="chat.request", payload=ChatTurn(session_id=session_id,prompt=prompt))
-        async for e in stream:
-            payload = ChatDone.model_validate(e.payload)
-            print(f'{payload.session_id} is finished')
-            break
+        event = await stream.get()
+        payload = ChatDone.model_validate(event.payload)
+        print(f'{payload.session_id} is finished')
 
 
 async def interactive_demo() -> None:

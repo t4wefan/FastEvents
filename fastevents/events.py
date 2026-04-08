@@ -47,6 +47,7 @@ class BusPublisher(Protocol):
         *,
         tags: TagInput,
         payload: Any = None,
+        reply_tags: TagInput | None = None,
         meta: dict[str, Any] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -65,6 +66,7 @@ class EventContext:
         *,
         tags: TagInput,
         payload: Any = None,
+        reply_tags: TagInput | None = None,
         meta: dict[str, Any] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -74,6 +76,7 @@ class EventContext:
         return await self._bus.publish(
             tags=tags,
             payload=payload,
+            reply_tags=reply_tags,
             meta=meta,
             id=id,
             timestamp=timestamp,

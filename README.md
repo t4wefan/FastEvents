@@ -1,14 +1,14 @@
 ## FastEvents
 
-`FastEvents` is a lightweight asyncio event framework for applications that need more structure than plain pub/sub, but do not want a full workflow engine or message broker.
+`FastEvents` is a lightweight, general-purpose asyncio event bus for Python applications, with a clear event model, a small runtime, and an extensible bus abstraction.
 
-It focuses on a small set of ideas:
+It is organized around a few core concepts while keeping an authoring experience closer to FastAPI-style declaration and a more ergonomic API surface:
 
-- layered propagation with `level`
-- explicit primary-handler and fallback flows
-- temporary event streams with `listen()`
-- formal request/reply instead of collecting handler return values
-- a minimal runtime event context with `publish()` and `reply()`
+- `FastEvents` / `app`: declaration and subscriber registration
+- `Dispatcher`: subscription matching, layered propagation, and dispatch
+- `Bus`: runtime delivery, lifecycle, and event entry points
+- an API centered on decorator-based handlers, minimal parameter injection, and explicit runtime capabilities
+- an abstract `Bus` contract that can be extended beyond the in-memory implementation
 
 The current implementation targets Python `3.12+` and ships with an in-memory bus.
 
@@ -46,7 +46,7 @@ async def lookup(event: RuntimeEvent, payload: dict) -> None:
 async def main() -> None:
     await bus.astart(app)
     try:
-        reply = await bus.request(tags="user.lookup", payload={"user_id": 7}, timeout=1)
+        reply = await app.request(tags="user.lookup", payload={"user_id": 7}, timeout=1)
         print(reply.payload)
     finally:
         await bus.astop()
@@ -57,10 +57,10 @@ asyncio.run(main())
 
 ## Core Model
 
-There are two main runtime objects:
+The two most common objects are:
 
 - `FastEvents`: declaration facade used to register subscribers
-- `InMemoryBus`: runtime object that starts the app and exposes `publish()`, `listen()`, and `request()`
+- `InMemoryBus`: runtime object that starts the app and exposes `publish()`
 
 Typical setup:
 
@@ -69,7 +69,7 @@ app = FastEvents()
 bus = InMemoryBus()
 ```
 
-Register subscribers with `@app.on(...)`, then start the bus.
+Register subscribers with `@app.on(...)`. Temporary listening and single-reply requests are then available through `app.listen()` and `app.request()` once the bus is running.
 
 ## Event Model
 
@@ -218,6 +218,13 @@ async def handle(event: RuntimeEvent, payload: dict) -> None:
     await event.ctx.publish(tags="order.validated", payload=payload)
 ```
 
+If you want downstream handlers to be able to `reply()`, you can also pass
+`reply_tags` explicitly when publishing:
+
+```python
+await bus.publish(tags="user.lookup", payload={"user_id": 7}, reply_tags="reply.user.lookup")
+```
+
 Use `reply()` inside a request/reply flow:
 
 ```python
@@ -250,7 +257,7 @@ finally:
 
 There is also `bus.run(app)` for a blocking runtime loop.
 
-Before start, `publish()`, `listen()`, and `request()` raise `BusNotStartedError`.
+Before start, `publish()` raises `BusNotStartedError`. `listen()` and `request()` also raise it if the app is not bound to a running bus.
 
 ## Publish
 
@@ -270,10 +277,10 @@ That boundary is deliberate and matches the current RFC.
 
 ## Listen
 
-`listen()` creates a temporary stream subscriber and returns an async context manager.
+`listen()` lives on `app` and creates a temporary stream subscriber.
 
 ```python
-async with bus.listen("notification.sent", level=-1) as stream:
+async with app.listen("notification.sent", level=-1) as stream:
     async for event in stream:
         print(event.payload)
 ```
@@ -287,10 +294,15 @@ Useful for:
 
 ## Request / Reply
 
-`request()` is the standard single-reply API.
+`request()` lives on `app` and is the standard single-reply API. Internally it follows this flow:
+
+- generate random `reply_tags`
+- register a temporary listener for replies
+- publish the request event with those `reply_tags`
+- wait for the first matching reply and return it
 
 ```python
-reply = await bus.request(
+reply = await app.request(
     tags="user.lookup",
     payload={"user_id": 7},
     timeout=1,
