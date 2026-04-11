@@ -1,0 +1,270 @@
+{
+  "repo_notes": [
+    {
+      "content": "FastEvents"
+    }
+  ],
+  "pages": [
+    {
+      "title": "FastEvents Overview",
+      "purpose": "High-level introduction to FastEvents: what it is, why it exists, its design philosophy, and how the major components relate. Links to child pages for deeper coverage.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "Practical guide for new users: installation, Python version requirements, running the demo, and a minimal working example showing app + bus + handler.",
+      "parent": "FastEvents Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Architecture Overview",
+      "purpose": "Explains the three-layer architecture (Runtime/Bus, Application Core/Dispatcher+Injector, Top Layer/Handlers+Extensions), the Declaration vs Execution space separation, and the transport boundary concept.",
+      "parent": "FastEvents Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Core Concepts",
+      "purpose": "Overview of the fundamental building blocks of FastEvents: events, subscriptions, propagation levels, and the publish/consume lifecycle. Links to child pages for each concept.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Event Model",
+      "purpose": "Detailed coverage of StandardEvent, RuntimeEvent, EventContext, and RuntimeEventView. Explains immutability, tag normalization, the new_event factory, and the BusPublisher protocol.",
+      "parent": "Core Concepts",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Subscription and Tag Matching",
+      "purpose": "Explains the OR-of-ANDs subscription DSL, tag normalization rules, positive/negative patterns, glob matching via fnmatchcase, and the normalize_tags / normalize_subscription / matches_subscription functions.",
+      "parent": "Core Concepts",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Level-Based Propagation",
+      "purpose": "Deep dive into the level system: negative levels for observation-only subscribers, level 0 for primary handlers, positive levels for fallback, concurrent same-level execution, and consumption semantics.",
+      "parent": "Core Concepts",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Application API (FastEvents Class)",
+      "purpose": "Overview of the FastEvents declaration facade and its public API. Links to child pages covering handler registration, event streaming, and the extension mount surface.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Registering Handlers with @app.on",
+      "purpose": "Covers the @app.on decorator: subscription input, level parameter, name parameter, HandlerSubscriber creation, and how handlers are added to the Dispatcher registry.",
+      "parent": "Application API (FastEvents Class)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Temporary Event Streams with app.listen",
+      "purpose": "Explains the app.listen async context manager, StreamSubscriber lifecycle, EventStream async iteration, cleanup guarantees, and use cases like testing and side-car monitoring.",
+      "parent": "Application API (FastEvents Class)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Publishing Events with app.publish",
+      "purpose": "Covers app.publish as the app-side transport boundary, the tags/payload/meta parameters, StandardEvent return value, BusNotStartedError guard, and the distinction from bus.publish.",
+      "parent": "Application API (FastEvents Class)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Runtime Bus",
+      "purpose": "Overview of the Bus abstraction and InMemoryBus implementation. Links to child pages covering lifecycle management and the internal dispatch pipeline.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Bus Lifecycle Management",
+      "purpose": "Covers the Bus abstract interface, InMemoryBus state machine (_started/_accepting/_stopping flags), astart/astop/run/start/stop methods, drain-based shutdown, and BusAlreadyStartedError / BusNotStartedError guards.",
+      "parent": "Runtime Bus",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Event Dispatch Pipeline",
+      "purpose": "Explains the internal flow from bus.publish → asyncio.Queue → _dispatch_worker → ingest → dispatcher.dispatch, the RuntimePublishScope ContextVar for re-entrant publishing, and task tracking during shutdown.",
+      "parent": "Runtime Bus",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Dispatcher and Subscribers",
+      "purpose": "Overview of how the Dispatcher routes events to subscribers and how subscriber implementations work. Links to child pages for the Dispatcher and the subscriber/DI system.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Dispatcher Internals",
+      "purpose": "Covers the Dispatcher class: subscriber registry, add/remove_subscriber, bind_runtime_publisher, the dispatch() algorithm (filter → group by level → concurrent gather → propagation control), ErrorHook, DispatcherSnapshot, and SubscriberSnapshot.",
+      "parent": "Dispatcher and Subscribers",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Dependency Injection and Handler Execution",
+      "purpose": "Covers HandlerSubscriber, the _DependencyResolver pipeline (RuntimeEvent injection, Pydantic payload validation, @dependency resolution), DependencyScope caching, cycle detection via InjectionError, RecoverableInjectionFailure, and SessionNotConsumed flow control.",
+      "parent": "Dispatcher and Subscribers",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "RPC Extension",
+      "purpose": "Overview of the RpcExtension system that layers request-reply semantics over the async event bus. Links to child pages for the API and internal mechanics.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "RpcExtension API",
+      "purpose": "Covers RpcExtension.request_stream(), request_one(), and request() methods, RpcContext and rpc_context() dependency, RpcReplyStream async iterator, and the AppExtensions mount surface (app.ex).",
+      "parent": "RPC Extension",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "RPC Internals: Correlation and Reply Routing",
+      "purpose": "Explains the correlation ID mechanism (RPC_CORRELATION_ID_KEY / RPC_REPLY_TAGS_KEY), temporary listener setup via AsyncExitStack, metadata injection into request events, RpcContext.reply() routing, timeout logic in RpcReplyStream, and RpcRequestTimeoutError / RpcReplyNotAvailableError.",
+      "parent": "RPC Extension",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Testing",
+      "purpose": "Guide to the test suite: what is covered, how to run tests, patterns used (bus lifecycle setup/teardown, DI caching tests, RPC round-trip tests), and the verify_rpc_di scripts.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Unit and Integration Tests",
+      "purpose": "Covers tests/test_fastevents.py: test structure, bus lifecycle fixtures, tag normalization tests, level propagation tests, DI caching and cycle detection tests, payload validation fallback tests, and RPC extension tests.",
+      "parent": "Testing",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Demo and Verification Scripts",
+      "purpose": "Covers demo.py (streaming LLM chat demo with RpcExtension), verify_rpc_di.py scripts, and the deprecated examples in _deprecated/ showing the evolution of the API.",
+      "parent": "Testing",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Design Documents and Roadmap",
+      "purpose": "Overview of the RFC and development plan documents that govern the project's design decisions and future direction.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "RFC 0001: Core Model and Runtime Protocol",
+      "purpose": "Summarizes the formal RFC defining the v0 core: event model, subscription DSL, subscriber protocol, propagation rules, handler injection model, stream-style subscribers, dispatcher responsibilities, bus lifecycle, and request/reply protocol.",
+      "parent": "Design Documents and Roadmap",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Development Plan: Minimal Core Architecture",
+      "purpose": "Covers the development-plan.md: the 5-phase boundary-reduction plan, removal of request/reply from core Bus/EventContext, introduction of DI v1, formalization of app.ex extension mount surface, and design guardrails (no Bus in extensions, minimal EventContext, no heavy lifecycle).",
+      "parent": "Design Documents and Roadmap",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Glossary",
+      "purpose": "Definitions of all codebase-specific terms, jargon, abbreviations, and domain concepts that an onboarding engineer needs to know, with code pointers.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}
