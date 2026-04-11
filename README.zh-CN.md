@@ -78,7 +78,7 @@ app = FastEvents()
 bus = InMemoryBus()
 ```
 
-通过 `@app.on(...)` 注册 subscriber。运行时的临时监听和单次请求则由 `app.listen()`、`app.request()` 提供。
+通过 `@app.on(...)` 注册 subscriber。运行时的临时监听和发布能力由 `app.listen()`、`app.publish()` 提供。
 
 ## 事件模型
 
@@ -164,7 +164,7 @@ async def primary(data: dict) -> None:
 
 @app.on("user.lookup", level=1)
 async def fallback(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.reply(payload={"path": "fallback", **payload})
+    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", **payload})
 ```
 
 ## Handler 注入
@@ -203,13 +203,32 @@ async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
 
 如果使用 `pydantic` 模型注入时 payload 因为不符合 model 而校验失败，当前 handler 会被视为放弃消费，事件可以继续交给更高 `level` 的 handler 处理。
 
+现在也支持基础的函数式 dependency：
+
+```python
+from fastevents import EventContext, RuntimeEvent, dependency
+
+
+@dependency
+def order_ctx(event: RuntimeEvent, ctx: EventContext) -> tuple[str, bool]:
+    return (event.id, ctx is event.ctx)
+
+
+@app.on("order.created")
+async def handle(info=order_ctx()) -> None:
+    print(info)
+```
+
+dependency 可以继续依赖当前 event、`ctx`、payload 注入，或者其他
+dependency。解析结果会在当前事件的一次 dispatch 过程中缓存，因此同一
+个事件上的多个 subscriber 也会复用同一个 dependency 结果。
+
 
 ## RuntimeEvent 与 `ctx`
 
-在 handler 内，如果需要继续和总线通信，例如发布后续事件或回复一次请求，就通过 `event.ctx` 来完成。
+在 handler 内，如果需要继续和总线通信，例如发布后续事件，就通过 `event.ctx` 来完成。
 
 - `await event.ctx.publish(...)`
-- `await event.ctx.reply(...)`
 
 `publish()` 用来继续发布新事件：
 
@@ -217,20 +236,6 @@ async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
 @app.on("order.created")
 async def handle(event: RuntimeEvent, payload: dict) -> None:
     await event.ctx.publish(tags="order.validated", payload=payload)
-```
-
-如果希望后续 handler 可以对这个事件执行 `reply()`，也可以在发布时显式传入 `reply_tags`：
-
-```python
-await bus.publish(tags="user.lookup", payload={"user_id": 7}, reply_tags="reply.user.lookup")
-```
-
-`reply()` 用来响应一次 request/reply：
-
-```python
-@app.on("user.lookup")
-async def handle(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.reply(payload={"user_id": payload["user_id"], "name": "Alice"})
 ```
 
 这样你就不需要在 handler 里手动查找 bus 依赖，和总线通信的入口也会更集中。
@@ -260,7 +265,7 @@ finally:
 另外还提供 `bus.run(app)` 这种阻塞式运行方式。这意味着 bus 会占用整个主线程，这之后的代码将不会运行。
 一般来说，如果你不手动 stop，在脚本退出时也会自动回收。
 
-在启动前调用 `publish()`，或者在 app 尚未绑定运行时 bus 时调用 `listen()`、`request()`，都会抛出 `BusNotStartedError`。
+在启动前调用 `publish()`，或者在 app 尚未绑定运行时 bus 时调用 `app.publish()`、`listen()`，都会抛出 `BusNotStartedError`。
 
 ## Publish
 
@@ -269,6 +274,12 @@ await bus.publish(tags="order.created", payload={"order_id": 1})
 ```
 
 发出一个消息，但是 `publish()` 只保证事件已经被创建并被 bus 接收。
+
+如果你希望通过 app 这个统一边界发消息，也可以这样写：
+
+```python
+await app.publish(tags="order.created", payload={"order_id": 1})
+```
 
 
 ## Listen
@@ -282,23 +293,5 @@ async with app.listen("notification.sent", level=-1) as stream:
 ```
 
 这样你就能在运行时临时监听某一类事件，而不需要提前把它声明成长期 handler。
-
-## Request
-
-`request()` 挂在 `app` 上，是标准的单次回复接口。它内部会按这个顺序完成几件事：
-
-- 先生成一组随机的 `reply_tags`
-- 再利用随机的 tags 注册一个临时 listener，用来接收 reply
-- 然后发布请求事件，并把 `reply_tags` 写入事件
-- 如果 request 被正确处理，那么应该会收到带有指定 tags 的 reply，等待第一条匹配的 reply 并返回
-
-```python
-reply = await app.request(
-    tags="user.lookup",
-    payload={"user_id": 7},
-    timeout=1,
-)
-```
-
 
 如果你关心实现细节或设计语义，可以看 `rfc.md` 以及项目源代码。

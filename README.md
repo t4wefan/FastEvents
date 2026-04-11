@@ -78,7 +78,7 @@ app = FastEvents()
 bus = InMemoryBus()
 ```
 
-Register subscribers with `@app.on(...)`. Temporary listening and single requests are then available through `app.listen()` and `app.request()`.
+Register subscribers with `@app.on(...)`. Temporary listening and app-bound publishing are then available through `app.listen()` and `app.publish()`.
 
 ## Event Model
 
@@ -188,6 +188,27 @@ async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
 
 If payload validation fails for a `pydantic` model, the current handler is treated as having declined the event, and a higher-level handler can still run.
 
+Basic function-style dependencies are also supported:
+
+```python
+from fastevents import EventContext, RuntimeEvent, dependency
+
+
+@dependency
+def order_ctx(event: RuntimeEvent, ctx: EventContext) -> tuple[str, bool]:
+    return (event.id, ctx is event.ctx)
+
+
+@app.on("order.created")
+async def handle(info=order_ctx()) -> None:
+    print(info)
+```
+
+Dependencies can depend on the current event, `ctx`, payload injection, or
+other dependencies. Resolution is cached for the current event dispatch, so
+multiple subscribers handling the same event can reuse the same dependency
+result.
+
 ## Fallback with `SessionNotConsumed`
 
 If a handler wants to explicitly give up processing, it can raise `SessionNotConsumed`. The event will then continue to a higher `level`, which makes fallback handlers straightforward to express.
@@ -206,17 +227,16 @@ async def primary(data: dict) -> None:
 
 @app.on("user.lookup", level=1)
 async def fallback(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.reply(payload={"path": "fallback", **payload})
+    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", **payload})
 ```
 
 ## RuntimeEvent and `ctx`
 
-Inside a handler, if you need to keep talking to the bus - for example by publishing a follow-up event or replying to a request - use `event.ctx`.
+Inside a handler, if you need to keep talking to the bus - for example by publishing a follow-up event - use `event.ctx`.
 
-The two most common methods are:
+The most common method is:
 
 - `await event.ctx.publish(...)`
-- `await event.ctx.reply(...)`
 
 Use `publish()` to continue the flow with a new event:
 
@@ -224,21 +244,6 @@ Use `publish()` to continue the flow with a new event:
 @app.on("order.created")
 async def handle(event: RuntimeEvent, payload: dict) -> None:
     await event.ctx.publish(tags="order.validated", payload=payload)
-```
-
-If you want downstream handlers to be able to `reply()`, you can also pass
-`reply_tags` explicitly when publishing:
-
-```python
-await bus.publish(tags="user.lookup", payload={"user_id": 7}, reply_tags="reply.user.lookup")
-```
-
-Use `reply()` inside a request/reply flow:
-
-```python
-@app.on("user.lookup")
-async def handle(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.reply(payload={"user_id": payload["user_id"], "name": "Alice"})
 ```
 
 ## Bus Lifecycle
@@ -265,7 +270,7 @@ finally:
 
 There is also `bus.run(app)` for a blocking runtime loop. In practice, that means the bus takes over the main thread until it stops.
 
-Before start, calling `publish()`, or calling `listen()` / `request()` before the app is bound to a running bus, raises `BusNotStartedError`.
+Before start, calling `publish()`, or calling `app.publish()` / `listen()` before the app is bound to a running bus, raises `BusNotStartedError`.
 
 ## Publish
 
@@ -274,6 +279,12 @@ await bus.publish(tags="order.created", payload={"order_id": 1})
 ```
 
 `publish()` sends an event, but it only guarantees that the event has been created and accepted by the bus.
+
+If you want to publish through the app boundary instead of calling the runtime directly:
+
+```python
+await app.publish(tags="order.created", payload={"order_id": 1})
+```
 
 ## Listen
 
@@ -287,35 +298,8 @@ async with app.listen("notification.sent", level=-1) as stream:
 
 This is useful when you want to observe a class of events at runtime without turning it into a permanent handler.
 
-## Request / Reply
-
-`request()` lives on `app` and is the standard single-reply API. Internally it works in this order:
-
-- generate random `reply_tags`
-- register a temporary listener for replies
-- publish the request event with those `reply_tags`
-- wait for the first matching reply and return it
-
-```python
-reply = await app.request(
-    tags="user.lookup",
-    payload={"user_id": 7},
-    timeout=1,
-)
-```
-
-Reserved metadata keys:
-
-- `reply_tags`
-- `correlation_id`
-
-`event.ctx.reply()` automatically uses those values when available.
-
-If no reply arrives before the timeout, `RequestTimeoutError` is raised.
-
 ## Examples
 
 - `python demo.py`: simple streaming terminal demo
-- `python listen_request_demo.py`: minimal `listen()` / `request()` demo
 
 For implementation details and design rationale, see `docs/rfc.md`.

@@ -6,7 +6,6 @@ from time import time
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .exceptions import ReplyNotAvailableError
 from .subscription import TagInput, normalize_tags
 
 
@@ -47,7 +46,6 @@ class BusPublisher(Protocol):
         *,
         tags: TagInput,
         payload: Any = None,
-        reply_tags: TagInput | None = None,
         meta: dict[str, Any] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -66,7 +64,6 @@ class EventContext:
         *,
         tags: TagInput,
         payload: Any = None,
-        reply_tags: TagInput | None = None,
         meta: dict[str, Any] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -76,38 +73,7 @@ class EventContext:
         return await self._bus.publish(
             tags=tags,
             payload=payload,
-            reply_tags=reply_tags,
             meta=meta,
-            id=id,
-            timestamp=timestamp,
-        )
-
-    async def reply(
-        self,
-        payload: Any = None,
-        *,
-        tags: TagInput | None = None,
-        meta: dict[str, Any] | None = None,
-        id: str | None = None,
-        timestamp: float | None = None,
-    ) -> StandardEvent:
-        """Publish a reply event for the current request/reply chain."""
-
-        target_tags = tags or self._event.meta.get("reply_tags")
-        if target_tags is None:
-            raise ReplyNotAvailableError("reply_tags not available on current event")
-
-        reply_meta: dict[str, Any] = {}
-        correlation_id = self._event.meta.get("correlation_id")
-        if correlation_id is not None:
-            reply_meta["correlation_id"] = correlation_id
-        if meta:
-            reply_meta.update(meta)
-
-        return await self._bus.publish(
-            tags=target_tags,
-            payload=payload,
-            meta=reply_meta,
             id=id,
             timestamp=timestamp,
         )

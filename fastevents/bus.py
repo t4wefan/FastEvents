@@ -9,11 +9,10 @@ from contextvars import ContextVar
 from typing import Any
 
 from .app import FastEvents
-from .dispatcher import DispatcherSnapshot
 from .events import StandardEvent, new_event
 from .exceptions import BusAlreadyStartedError, BusNotStartedError
 from .subscribers import EventStream
-from .subscription import SubscriptionInput, TagInput, normalize_tags
+from .subscription import SubscriptionInput, TagInput
 
 
 _runtime_publish_scope: ContextVar[int] = ContextVar("fastevents_runtime_publish_scope", default=0)
@@ -23,7 +22,7 @@ class Bus(ABC):
     """Runtime bus contract for a local FastEvents application.
 
     The bus owns lifecycle, admission into the runtime send boundary, and
-    request/listen helpers built on top of dispatcher-managed subscribers.
+    stream-style listening built on top of dispatcher-managed subscribers.
     """
 
     @abstractmethod
@@ -65,7 +64,6 @@ class Bus(ABC):
         *,
         tags: TagInput,
         payload: Any = None,
-        reply_tags: TagInput | None = None,
         meta: dict[str, object] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -90,19 +88,6 @@ class Bus(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def request(
-        self,
-        *,
-        tags: TagInput,
-        payload: Any = None,
-        meta: dict[str, object] | None = None,
-        timeout: float | None = None,
-        level: int = 0,
-    ) -> StandardEvent:
-        """Send one request event and await the first matching reply."""
-        raise NotImplementedError
-
-    @abstractmethod
     async def send(self, event: StandardEvent) -> None:
         """Accept an already-built event into the runtime send boundary."""
         raise NotImplementedError
@@ -111,12 +96,6 @@ class Bus(ABC):
     async def ingest(self, event: StandardEvent) -> None:
         """Process an already-built event inside the local runtime boundary."""
         raise NotImplementedError
-
-    @abstractmethod
-    async def sync(self, snapshot: DispatcherSnapshot) -> None:
-        """Refresh bus-side runtime state from a dispatcher snapshot."""
-        raise NotImplementedError
-
 
 class InMemoryBus(Bus):
     """In-memory bus implementation with queued admission and async dispatch."""
@@ -228,7 +207,6 @@ class InMemoryBus(Bus):
         *,
         tags: TagInput,
         payload=None,
-        reply_tags: TagInput | None = None,
         meta: dict[str, object] | None = None,
         id: str | None = None,
         timestamp: float | None = None,
@@ -236,10 +214,7 @@ class InMemoryBus(Bus):
         """Create a new event and enqueue it for runtime admission."""
         await self._ensure_runtime_ready()
         self._ensure_publish_allowed()
-        event_meta = dict(meta or {})
-        if reply_tags is not None:
-            event_meta["reply_tags"] = normalize_tags(reply_tags)
-        event = new_event(tags=tags, payload=payload, meta=event_meta, id=id, timestamp=timestamp)
+        event = new_event(tags=tags, payload=payload, meta=meta, id=id, timestamp=timestamp)
         await self.send(event)
         return event
 
@@ -256,19 +231,6 @@ class InMemoryBus(Bus):
         app = self._require_app()
         async with app.listen(subscription, level=level, name=name, maxsize=maxsize) as stream:
             yield stream
-
-    async def request(
-        self,
-        *,
-        tags: TagInput,
-        payload=None,
-        meta: dict[str, object] | None = None,
-        timeout: float | None = None,
-        level: int = 0,
-    ) -> StandardEvent:
-        """Create a temporary reply subscriber and await the first reply event."""
-        app = self._require_app()
-        return await app.request(tags=tags, payload=payload, meta=meta, timeout=timeout, level=level)
 
     async def send(self, event: StandardEvent) -> None:
         """Enqueue an already-built event into the in-memory admission queue."""
@@ -290,11 +252,6 @@ class InMemoryBus(Bus):
             await app.dispatcher.dispatch(event)
         finally:
             _runtime_publish_scope.reset(token)
-
-    async def sync(self, snapshot: DispatcherSnapshot) -> None:
-        """No-op sync hook for the in-memory implementation."""
-        _ = snapshot
-        self._ensure_started()
 
     async def _ensure_runtime_ready(self) -> None:
         self._ensure_runtime_bound()

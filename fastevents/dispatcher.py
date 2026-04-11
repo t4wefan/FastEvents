@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .events import EventContext, RuntimeEventView, StandardEvent
-from .subscribers import Subscriber, SubscriberResult
+from .subscribers import DependencyScope, Subscriber, SubscriberResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +84,11 @@ class Dispatcher:
         for subscriber in matched:
             groups.setdefault(subscriber.level, []).append(subscriber)
 
+        runtime_event = RuntimeEventView(event, EventContext(self._runtime_publisher, event))
+        dependency_scope = DependencyScope(event=runtime_event, cache={}, resolving=set())
         for level in sorted(groups):
-            runtime_event = RuntimeEventView(event, EventContext(self._runtime_publisher, event))
             results = await asyncio.gather(
-                *(subscriber.handle(runtime_event) for subscriber in groups[level]),
+                *(subscriber.handle(runtime_event, dependency_scope) for subscriber in groups[level]),
                 return_exceptions=True,
             )
             level_consumed = False

@@ -4,17 +4,16 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, get_origin, get_type_hints
+from functools import update_wrapper
+from typing import Any, Generic, Protocol, TypeVar, cast, get_origin, get_type_hints
 
-from .events import RuntimeEvent, StandardEvent
+from pydantic import BaseModel, ValidationError
+
+from .events import EventContext, RuntimeEvent, StandardEvent
 from .exceptions import InjectionError, SessionNotConsumed
 from .subscription import SubscriptionInput, matches_subscription, normalize_subscription
 
-try:
-    from pydantic import BaseModel, ValidationError
-except Exception:  # pragma: no cover - optional at runtime
-    BaseModel = None  # type: ignore[assignment]
-    ValidationError = None  # type: ignore[assignment]
+DependencyValueT = TypeVar("DependencyValueT")
 
 
 @dataclass(slots=True)
@@ -33,13 +32,41 @@ class Subscriber(Protocol):
 
     def should_handle(self, event: StandardEvent) -> bool: ...
 
-    async def handle(self, event: RuntimeEvent) -> SubscriberResult: ...
+    async def handle(self, event: RuntimeEvent, dependency_scope: "DependencyScope | None" = None) -> SubscriberResult: ...
 
     async def close(self) -> None: ...
 
 
+@dataclass(slots=True, frozen=True)
+class DependencyCall(Generic[DependencyValueT]):
+    dependency: "Dependency[DependencyValueT]"
+
+
+@dataclass(slots=True)
+class DependencyScope:
+    event: RuntimeEvent
+    cache: dict[Dependency[Any], Any]
+    resolving: set[Dependency[Any]]
+
+
+class Dependency(Generic[DependencyValueT]):
+    def __init__(self, callback: Callable[..., DependencyValueT]) -> None:
+        self.callback = callback
+        update_wrapper(self, callback)
+        self.name = getattr(callback, "__name__", callback.__class__.__name__)
+
+    def __call__(self) -> DependencyValueT:
+        return cast(DependencyValueT, DependencyCall(self))
+
+
+def dependency(callback: Callable[..., DependencyValueT]) -> Dependency[DependencyValueT]:
+    """Declare a lightweight dependency that can be requested from handlers."""
+
+    return Dependency(callback)
+
+
 def _is_basemodel_type(annotation: Any) -> bool:
-    if BaseModel is None or not inspect.isclass(annotation):
+    if not inspect.isclass(annotation):
         return False
     return issubclass(annotation, BaseModel)
 
@@ -49,7 +76,7 @@ def _validate_basemodel(annotation: Any, payload: Any) -> Any:
 
 
 class HandlerSubscriber:
-    """Handler-backed subscriber with minimal event and payload injection."""
+    """Handler-backed subscriber with lightweight dependency resolution."""
 
     def __init__(
         self,
@@ -69,16 +96,15 @@ class HandlerSubscriber:
         self.closed = False
         self._callback = callback
         self._subscription = normalize_subscription(subscription)
-        self._event_param = None
-        self._payload_param = None
-        self._parse_signature()
+        self._validate_signature(callback)
 
     def should_handle(self, event: StandardEvent) -> bool:
         return not self.closed and matches_subscription(self._subscription, event.tags)
 
-    async def handle(self, event: RuntimeEvent) -> SubscriberResult:
+    async def handle(self, event: RuntimeEvent, dependency_scope: DependencyScope | None = None) -> SubscriberResult:
         try:
-            kwargs = self._inject(event)
+            scope = dependency_scope or DependencyScope(event=event, cache={}, resolving=set())
+            kwargs = await _DependencyResolver(scope).build_kwargs(self._callback)
         except _RecoverableInjectionFailure:
             return SubscriberResult(consumed=False, exc=None)
         except Exception as exc:
@@ -97,9 +123,9 @@ class HandlerSubscriber:
     async def close(self) -> None:
         self.closed = True
 
-    def _parse_signature(self) -> None:
-        signature = inspect.signature(self._callback)
-        type_hints = get_type_hints(self._callback)
+    def _validate_signature(self, callback: Callable[..., Any]) -> None:
+        signature = inspect.signature(callback)
+        type_hints = get_type_hints(callback)
         for parameter in signature.parameters.values():
             if parameter.kind not in (
                 inspect.Parameter.POSITIONAL_ONLY,
@@ -108,53 +134,128 @@ class HandlerSubscriber:
             ):
                 raise InjectionError("varargs are not supported")
 
+            if isinstance(parameter.default, DependencyCall):
+                continue
+
             annotation = type_hints.get(parameter.name, parameter.annotation)
             if annotation is inspect.Signature.empty:
                 if parameter.default is inspect.Signature.empty:
                     raise InjectionError("required parameters must be injectable")
                 continue
 
-            if annotation is RuntimeEvent or annotation is StandardEvent or getattr(annotation, "__name__", None) == "Event":
-                if self._event_param is not None:
-                    raise InjectionError("only one event parameter is allowed")
-                self._event_param = parameter.name
+            if _is_event_annotation(annotation) or _is_context_annotation(annotation):
                 continue
 
             origin = get_origin(annotation)
             if annotation is dict or origin is dict or _is_basemodel_type(annotation):
-                if self._payload_param is not None:
-                    raise InjectionError("only one payload parameter is allowed")
-                self._payload_param = (parameter.name, annotation)
                 continue
 
             if parameter.default is inspect.Signature.empty:
                 raise InjectionError(f"unsupported required parameter: {parameter.name}")
 
-    def _inject(self, event: RuntimeEvent) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        if self._event_param is not None:
-            kwargs[self._event_param] = event
-        if self._payload_param is None:
-            return kwargs
 
-        payload_name, annotation = self._payload_param
-        payload = event.payload
+def _is_event_annotation(annotation: Any) -> bool:
+    return annotation is RuntimeEvent or annotation is StandardEvent or getattr(annotation, "__name__", None) == "Event"
+
+
+def _is_context_annotation(annotation: Any) -> bool:
+    return annotation is EventContext
+
+
+class _DependencyResolver:
+    def __init__(self, scope: DependencyScope) -> None:
+        self._scope = scope
+
+    async def build_kwargs(self, callback: Callable[..., Any]) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        signature = inspect.signature(callback)
+        type_hints = get_type_hints(callback)
+        event_param_used = False
+        payload_param_used = False
+        ctx_param_used = False
+
+        for parameter in signature.parameters.values():
+            if parameter.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                raise InjectionError("varargs are not supported")
+
+            if isinstance(parameter.default, DependencyCall):
+                kwargs[parameter.name] = await self.resolve_dependency(parameter.default.dependency)
+                continue
+
+            annotation = type_hints.get(parameter.name, parameter.annotation)
+            if annotation is inspect.Signature.empty:
+                if parameter.default is inspect.Signature.empty:
+                    raise InjectionError("required parameters must be injectable")
+                continue
+
+            if _is_event_annotation(annotation):
+                if event_param_used:
+                    raise InjectionError("only one event parameter is allowed")
+                kwargs[parameter.name] = self._scope.event
+                event_param_used = True
+                continue
+
+            if _is_context_annotation(annotation):
+                if ctx_param_used:
+                    raise InjectionError("only one context parameter is allowed")
+                kwargs[parameter.name] = self._scope.event.ctx
+                ctx_param_used = True
+                continue
+
+            origin = get_origin(annotation)
+            if annotation is dict or origin is dict or _is_basemodel_type(annotation):
+                if payload_param_used:
+                    raise InjectionError("only one payload parameter is allowed")
+                kwargs[parameter.name] = self._resolve_payload(annotation)
+                payload_param_used = True
+                continue
+
+            if parameter.default is inspect.Signature.empty:
+                raise InjectionError(f"unsupported required parameter: {parameter.name}")
+
+        return kwargs
+
+    async def resolve_dependency(self, dependency: Dependency[Any]) -> Any:
+        cached = self._scope.cache.get(dependency, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        if dependency in self._scope.resolving:
+            raise InjectionError(f"dependency cycle detected: {dependency.name}")
+
+        self._scope.resolving.add(dependency)
+        try:
+            kwargs = await self.build_kwargs(dependency.callback)
+            result = dependency.callback(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            self._scope.cache[dependency] = result
+            return result
+        finally:
+            self._scope.resolving.remove(dependency)
+
+    def _resolve_payload(self, annotation: Any) -> Any:
+        payload = self._scope.event.payload
         if annotation is dict or get_origin(annotation) is dict:
             if not isinstance(payload, dict):
                 raise _RecoverableInjectionFailure()
-            kwargs[payload_name] = payload
-            return kwargs
+            return payload
 
         if _is_basemodel_type(annotation):
             try:
-                kwargs[payload_name] = _validate_basemodel(annotation, payload)
+                return _validate_basemodel(annotation, payload)
             except Exception as exc:  # pragma: no branch
-                if ValidationError is not None and isinstance(exc, ValidationError):
+                if isinstance(exc, ValidationError):
                     raise _RecoverableInjectionFailure() from exc
                 raise
-            return kwargs
 
         raise InjectionError("unsupported payload annotation")
+
+
+_MISSING = object()
 
 
 class _RecoverableInjectionFailure(Exception):
@@ -223,7 +324,8 @@ class StreamSubscriber:
             return True
         return self._extra_predicate(event)
 
-    async def handle(self, event: RuntimeEvent) -> SubscriberResult:
+    async def handle(self, event: RuntimeEvent, dependency_scope: DependencyScope | None = None) -> SubscriberResult:
+        _ = dependency_scope
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull as exc:

@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from typing import Any
 
 from pydantic import BaseModel
 
-from fastevents import FastEvents, InMemoryBus, RequestTimeoutError, RuntimeEvent, SessionNotConsumed
+from fastevents import EventContext, FastEvents, InMemoryBus, RpcContext, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
+from fastevents.events import RuntimeEventView, new_event
+from fastevents.exceptions import InjectionError
+from fastevents.ext.rpc import RpcReplyNotAvailableError, RpcRequestTimeoutError
+from fastevents.subscribers import HandlerSubscriber
 from fastevents.subscription import normalize_tags
 
 
 class OrderPayload(BaseModel):
     order_id: int
+
+
+class LookupReply(BaseModel):
+    user_id: int
+    name: str
 
 
 class FastEventsTests(unittest.IsolatedAsyncioTestCase):
@@ -88,60 +98,32 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen, ["fallback:bad"])
 
-    async def test_request_reply_roundtrip(self) -> None:
+    async def test_app_publish_uses_runtime_bus(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        seen: list[dict] = []
 
         @app.on("user.lookup")
-        async def lookup(event: RuntimeEvent, payload: dict):
-            await event.ctx.reply(payload={"user_id": payload["user_id"], "name": "Alice"})
+        async def lookup(payload: dict) -> None:
+            seen.append(payload)
 
         await bus.astart(app)
         try:
-            reply = await app.request(tags="user.lookup", payload={"user_id": 7}, timeout=1)
+            await app.publish(tags="user.lookup", payload={"user_id": 7})
             await bus.astop()
         finally:
             if bus._started:  # type: ignore[attr-defined]
                 await bus.astop()
 
-        self.assertEqual(reply.payload, {"user_id": 7, "name": "Alice"})
-        self.assertIn("correlation_id", reply.meta)
+        self.assertEqual(seen, [{"user_id": 7}])
 
-    async def test_publish_accepts_explicit_reply_tags(self) -> None:
-        app = FastEvents()
-        bus = InMemoryBus()
-        seen: list[tuple[str, ...]] = []
-
-        @app.on("user.lookup")
-        async def lookup(event: RuntimeEvent, payload: dict) -> None:
-            seen.append(tuple(event.meta.get("reply_tags", ())))
-            await event.ctx.reply(payload={"ok": True, **payload})
-
-        await bus.astart(app)
-        try:
-            async with app.listen(("reply.manual", "session.1"), level=-1) as stream:
-                published = await bus.publish(
-                    tags="user.lookup",
-                    payload={"user_id": 7},
-                    reply_tags=("reply.manual", "session.1"),
-                )
-                emitted = await asyncio.wait_for(stream.get(), timeout=1)
-            await bus.astop()
-        finally:
-            if bus._started:  # type: ignore[attr-defined]
-                await bus.astop()
-
-        self.assertEqual(published.meta["reply_tags"], ("reply.manual", "session.1"))
-        self.assertEqual(seen, [("reply.manual", "session.1")])
-        self.assertEqual(emitted.payload, {"ok": True, "user_id": 7})
-
-    async def test_ctx_publish_accepts_explicit_reply_tags(self) -> None:
+    async def test_ctx_publish_emits_followup_event(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
 
         @app.on("start")
         async def start(event: RuntimeEvent) -> None:
-            await event.ctx.publish(tags="next", payload={"step": 1}, reply_tags="reply.next")
+            await event.ctx.publish(tags="next", payload={"step": 1})
 
         await bus.astart(app)
         try:
@@ -153,17 +135,218 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
             if bus._started:  # type: ignore[attr-defined]
                 await bus.astop()
 
-        self.assertEqual(emitted.meta["reply_tags"], ("reply.next",))
+        self.assertEqual(emitted.payload, {"step": 1})
 
-    async def test_request_timeout(self) -> None:
+    async def test_dependency_can_inject_event_context_and_payload_model(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        seen: list[tuple[int, bool]] = []
+
+        @dependency
+        def order_ctx(event: RuntimeEvent, ctx: EventContext, data: OrderPayload) -> tuple[int, bool]:
+            return (data.order_id, ctx is event.ctx)
+
+        @app.on("order.created")
+        async def handle(info: Any = order_ctx()) -> None:
+            seen.append(info)
+
         await bus.astart(app)
         try:
-            with self.assertRaises(RequestTimeoutError):
-                await app.request(tags="missing.handler", payload={}, timeout=0.01)
+            await app.publish(tags="order.created", payload={"order_id": 7})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [(7, True)])
+
+    async def test_dependency_result_is_cached_per_handler_call(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        calls: list[int] = []
+        seen: list[tuple[int, int]] = []
+
+        @dependency
+        def sequence() -> int:
+            calls.append(len(calls) + 1)
+            return calls[-1]
+
+        @app.on("cache.test")
+        async def handle(first: Any = sequence(), second: Any = sequence()) -> None:
+            seen.append((first, second))
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="cache.test", payload={})
+            await app.publish(tags="cache.test", payload={})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [(1, 1), (2, 2)])
+
+    async def test_dependency_cache_is_shared_across_subscribers_for_one_event(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        calls: list[int] = []
+        seen: list[tuple[str, int]] = []
+
+        @dependency
+        def sequence() -> int:
+            calls.append(len(calls) + 1)
+            return calls[-1]
+
+        @app.on("shared.cache")
+        async def first(value: Any = sequence()) -> None:
+            seen.append(("first", value))
+
+        @app.on("shared.cache")
+        async def second(value: Any = sequence()) -> None:
+            seen.append(("second", value))
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="shared.cache", payload={})
+            await app.publish(tags="shared.cache", payload={})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [("first", 1), ("second", 1), ("first", 2), ("second", 2)])
+
+    async def test_dependency_cycle_is_reported(self) -> None:
+        @dependency
+        def dep_a(value: Any = None) -> str:
+            return f"a:{value}"
+
+        @dependency
+        def dep_b(value: Any = None) -> str:
+            return f"b:{value}"
+
+        dep_a.callback.__defaults__ = (dep_b(),)
+        dep_b.callback.__defaults__ = (dep_a(),)
+
+        async def handle(value: Any = dep_a()) -> None:
+            _ = value
+
+        subscriber = HandlerSubscriber(
+            id="cycle-test",
+            callback=handle,
+            subscription="cycle.test",
+        )
+        event = new_event(tags="cycle.test", payload={})
+        runtime_event = RuntimeEventView(event, EventContext(InMemoryBus(), event))
+
+        result = await subscriber.handle(runtime_event)
+
+        self.assertTrue(result.consumed)
+        self.assertIsInstance(result.exc, InjectionError)
+
+    async def test_rpc_request_returns_all_replies(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        @app.on("user.lookup")
+        async def lookup(rpc: Any = rpc_context()) -> None:
+            await rpc.reply(payload={"user_id": 1, "name": "Alice"})
+            await rpc.reply(payload={"user_id": 2, "name": "Bob"})
+
+        await bus.astart(app)
+        try:
+            rpc = getattr(app.ex, "rpc")
+            replies = await rpc.request(tags="user.lookup", payload={"ok": True}, max_size=2)
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual([reply.payload for reply in replies], [{"user_id": 1, "name": "Alice"}, {"user_id": 2, "name": "Bob"}])
+
+    async def test_rpc_request_one_returns_first_reply(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        @app.on("user.lookup")
+        async def lookup(rpc: Any = rpc_context()) -> None:
+            await rpc.reply(payload={"user_id": 7, "name": "Alice"})
+            await rpc.reply(payload={"user_id": 8, "name": "Bob"})
+
+        await bus.astart(app)
+        try:
+            rpc = getattr(app.ex, "rpc")
+            reply = await rpc.request_one(tags="user.lookup", payload={"ok": True})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(reply.payload, {"user_id": 7, "name": "Alice"})
+
+    async def test_rpc_request_stream_yields_replies(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        @app.on("user.lookup")
+        async def lookup(rpc: Any = rpc_context()) -> None:
+            await rpc.reply(payload={"user_id": 1, "name": "Alice"})
+            await rpc.reply(payload={"user_id": 2, "name": "Bob"})
+
+        await bus.astart(app)
+        try:
+            rpc = getattr(app.ex, "rpc")
+            stream = await rpc.request_stream(tags="user.lookup", payload={"ok": True}, max_size=2)
+            try:
+                replies = [reply async for reply in stream]
+            finally:
+                await stream.close()
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual([reply.payload for reply in replies], [{"user_id": 1, "name": "Alice"}, {"user_id": 2, "name": "Bob"}])
+
+    async def test_rpc_request_timeout_raises(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        await bus.astart(app)
+        try:
+            rpc = getattr(app.ex, "rpc")
+            with self.assertRaises(RpcRequestTimeoutError):
+                await rpc.request_one(tags="missing.handler", payload={}, timeout=0.01)
         finally:
             await bus.astop()
+
+    async def test_rpc_request_can_validate_model(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        @app.on("user.lookup")
+        async def lookup(rpc: Any = rpc_context()) -> None:
+            await rpc.reply(payload={"user_id": 7, "name": "Alice"})
+
+        await bus.astart(app)
+        try:
+            rpc = getattr(app.ex, "rpc")
+            reply = await rpc.request_one(tags="user.lookup", payload={"ok": True}, model=LookupReply)
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(reply.user_id, 7)
+        self.assertEqual(reply.name, "Alice")
+
+    async def test_rpc_context_reply_requires_reply_tags(self) -> None:
+        event = new_event(tags="x", payload={})
+        runtime_event = RuntimeEventView(event, EventContext(InMemoryBus(), event))
+        rpc = RpcContext(event=runtime_event, ctx=runtime_event.ctx)
+
+        with self.assertRaises(RpcReplyNotAvailableError):
+            await rpc.reply(payload={"ok": True})
 
     async def test_app_listen_exposes_get_helper(self) -> None:
         app = FastEvents()
