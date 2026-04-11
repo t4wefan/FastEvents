@@ -1,229 +1,181 @@
 # FastEvents
 
-**FastEvents brings the programming model of great Python web frameworks to general event systems.**
+**Bring the programming model of great Python web frameworks to general event systems.**
 
-Build applications around events with:
+FastEvents is not just an event bus.
 
-- a clear runtime boundary
-- declarative handlers
-- structured dependency injection
-- composable higher-level protocols like RPC
-- room for streams, proxies, lifecycle events, and future distributed buses
+It is closer to an application model for events:
 
-FastEvents is not just an event bus. It is an event application framework: one that takes the design lessons proven in HTTP frameworks and generalizes them to broader event-driven systems.
+- organize behavior with declarative handlers
+- build handler inputs through structured injection
+- keep runtime complexity behind a clear runtime boundary
+- compose higher-level protocols like RPC out of events
+- leave room for streams, proxies, lifecycle events, and future distributed buses
 
-## Install
-
-```bash
-pip install fastevents
-```
+If you like the feel of modern Python web frameworks - clear handlers, natural dependencies, explicit boundaries - FastEvents tries to bring that experience to more general event-driven systems.
 
 ---
 
-## Quick start
+## Install
+
+If you want to use the repository directly:
+
+```bash
+uv add https://github.com/t4wefan/FastEvents.git
+```
+
+For local development:
+
+```bash
+uv sync
+```
+
+The current implementation targets Python `3.12+` and ships with an in-memory `InMemoryBus`.
+
+---
+
+## Quick Start
+
+Start with the smallest possible hello world:
+
+```python
+from fastevents import FastEvents, RuntimeEvent
+
+app = FastEvents()
+
+@app.on("hello")
+async def hello(event: RuntimeEvent) -> None:
+    print("hello world")
+```
+
+Those four lines already show the basic shape of FastEvents:
+
+- import `FastEvents`
+- declare an `app`
+- register a handler with `@app.on(...)`
+- express event behavior with a normal async function
+
+As you go further, FastEvents keeps building on top of that minimal model:
+
+- `bus` owns the runtime boundary
+- `app` declares behavior
+- handlers stay small and explicit
+- RPC is not a separate core model, but a protocol built on top of events
+
+Here is a slightly richer example that shows:
+
+- dependency injection
+- `event.ctx.publish()`
+- `pydantic` payload validation
 
 ```python
 import asyncio
 
 from pydantic import BaseModel
 
-from fastevents import FastEvents, InMemoryBus
-from fastevents.ext.rpc import RpcExtension, rpc_context, RpcContext
+from fastevents import FastEvents, InMemoryBus, RuntimeEvent, dependency
 
 app = FastEvents()
-rpc = RpcExtension(app)
 bus = InMemoryBus()
 
 
-class ChatTurn(BaseModel):
+class WorldPayload(BaseModel):
     text: str
 
 
-class ChatReply(BaseModel):
-    answer: str
+@dependency
+def say_hello(event: RuntimeEvent) -> bool:
+    return event.payload is not None
 
 
-@app.on("chat.request")
-async def chat(payload: ChatTurn, rpc: RpcContext = rpc_context()) -> None:
-    answer = f"You said: {payload.text}"
-    await rpc.reply(payload=ChatReply(answer=answer))
+@app.on("hello")
+async def hello(event: RuntimeEvent, ok: bool = say_hello()) -> None:
+    if ok:
+        await event.ctx.publish(tags="world", payload={"text": "world"})
+
+
+@app.on("world")
+async def world(data: WorldPayload) -> None:
+    print(data.text)
 
 
 async def main() -> None:
     await bus.astart(app)
-    reply = await rpc.request_one(
-        tags="chat.request",
-        payload=ChatTurn(text="hello"),
-        model=ChatReply,
-    )
-    print(reply.answer)
+    try:
+        await app.publish(tags="hello", payload={"message": "hello"})
+    finally:
+        await bus.astop()
 
 
 asyncio.run(main())
 ```
 
-Output:
+What happens here:
 
-```text
-You said: hello
-```
-
-This example already shows the core shape of FastEvents:
-
-- `bus` owns the runtime boundary
-- `app` declares behavior
-- handlers stay small and explicit
-- RPC is an extension built on top of events, not a separate core model
+- the `hello` handler receives the result of `say_hello()` through dependency injection
+- `say_hello()` depends on the current `event` and returns `True` when the payload is not empty
+- the `hello` handler publishes a follow-up `world` event when the condition is met
+- the `world` handler validates the payload with a `pydantic` model and prints `world`
 
 ---
 
-## Design goals
+## Why It Is More Than Another Event Bus
 
-FastEvents is designed around a few strict boundaries.
+Many event libraries stay close to transport or callback registries.
+
+FastEvents is trying to solve a different problem:
+
+**How do you write event applications the way you write web applications?**
+
+In other words, the focus is not just "how do I send a message", but:
+
+- how to clearly declare who handles which event
+- how to inject payload, context, and dependencies naturally into handlers
+- how to keep follow-up events, request/reply, and fallback inside one model
+- how to keep runtime complexity in the bus instead of leaking it into the app layer
+
+The goal is not to cram every feature into the core. The goal is to keep the core boundaries clear enough that higher-level protocols can grow naturally.
+
+---
+
+## Design Boundaries
+
+The appeal of FastEvents is not only that it works, but that it stays disciplined about semantics.
 
 ### 1. `publish()` is a transport boundary, not a completion guarantee
 
-Publishing an event means submitting it to the bus so matching handlers can respond.
+Publishing an event means submitting it to the bus.
 
 `publish()` does **not** guarantee that:
 
 - any handler has already run
 - any handler will succeed
-- processing has completed
+- all processing has completed
 - a distributed network has reached global consistency
 
-It only guarantees that the event has been accepted and sent through the bus boundary.
+It only guarantees this:
 
-This is intentional. If you need replies, completion, aggregation, or acknowledgements, build those as higher-level protocols on top of events.
+**the event has been accepted by the bus and entered the bus send boundary.**
+
+This is intentional. It means the semantics of `publish()` do not need to change later, whether the runtime is an in-memory bus, a remote broker, or a distributed bus.
+
+If you need replies, completion, aggregation, or acknowledgements, they should be built on top of events rather than pushed down into `publish()`.
 
 ### 2. `app` is not a full host
 
-`FastEvents` is an application declaration and composition container.
+`FastEvents` is a declaration and composition container.
 
-It does not own all resources, does not imply a full plugin host, and does not replace the runtime responsibilities of the bus.
+It is not a full application host, it does not own every resource, and it does not try to become a framework-managed plugin platform. Runtime complexity belongs to the bus, not to the app.
 
 ### 3. extensions are composition, not framework-managed plugins
 
-Extensions are ordinary objects that use the app's public capabilities.
+Extensions should be ordinary objects that compose higher-level behavior from the app's public capabilities.
 
-They are not privileged subsystems and should not depend on framework internals. Resource ownership remains explicit.
+- they should not depend on framework internals
+- they should not have privileged status
+- their resource ownership should stay explicit
 
-### 4. runtime complexity belongs in the bus
-
-The bus may manage lifecycle, event loop ownership, transport concerns, and eventually distributed delivery behavior.
-
-That complexity belongs in the runtime layer, not in the application model.
-
----
-
-## Core model
-
-FastEvents can be understood as a layered architecture.
-
-### Runtime layer
-
-#### bus
-
-The bus is the lowest layer.
-
-It is responsible for runtime and transport concerns, such as:
-
-- accepting published events
-- attaching to or creating an event loop
-- managing runtime lifecycle
-- transporting events into the application core
-- supporting future distributed or multi-node delivery models
-
-### Application core
-
-The app core can be understood as a processing chain.
-
-#### dispatcher
-
-Selects matching responders and applies propagation rules.
-
-#### injector
-
-Builds the inputs for a call from payloads, context, and declared dependencies.
-
-#### invoker
-
-Performs the actual call.
-
-### Top layer
-
-#### handlers
-
-Handlers express application behavior.
-
-#### extensions
-
-Extensions express higher-level capabilities, such as RPC or proxies, using only the app's public model.
-
-Handlers and extensions are parallel layers built on top of the same application core.
-
----
-
-## Propagation model
-
-FastEvents uses a level-based propagation model.
-
-The important idea is that propagation decisions come from clear stages in the application chain.
-
-- The **dispatcher** decides which responders are candidates.
-- The **injector** decides whether a valid call can be formed.
-- The **handler** decides whether it accepts handling.
-
-This keeps propagation semantics explicit without introducing a more complex state machine.
-
-`consumed` is a propagation concept. It should be understood as whether higher-level propagation should continue, not as a broad business-success signal.
-
----
-
-## Event loops and startup
-
-FastEvents supports two runtime startup modes.
-
-### `await bus.astart(app)`
-
-Use this when you are already inside an existing event loop.
-
-The bus binds its runtime to the current loop.
-
-### `loop = bus.start(app)`
-
-Use this from synchronous environments.
-
-The bus creates and owns a new event loop and returns it.
-
-This makes it possible to continue doing other synchronous setup or loop-bound work in that runtime.
-
-In other words:
-
-- use `astart()` when a loop already exists
-- use `start()` when the bus should create the runtime loop
-
----
-
-## Lifecycle as events
-
-FastEvents treats lifecycle as part of the event model.
-
-Runtime stages such as startup and shutdown can be represented as internal events rather than as a separate hook system.
-
-This keeps lifecycle behavior inside the same programming model:
-
-- the bus drives lifecycle transitions
-- the app core handles lifecycle events using the same dispatch/injection/invocation pipeline
-- handlers and extensions can respond without requiring a separate plugin lifecycle API
-
----
-
-## Extensions
-
-FastEvents extensions are built through explicit composition.
-
-Recommended style:
+The recommended direction is explicit construction:
 
 ```python
 from fastevents import FastEvents
@@ -233,58 +185,252 @@ app = FastEvents()
 rpc = RpcExtension(app)
 ```
 
-This keeps extension construction explicit and improves clarity.
+Compared with the historical `app.ex` style, this is clearer and works better with type inference.
 
-The historical `app.ex` style may still exist in some code paths, but explicit construction is the preferred direction.
+### 4. runtime complexity belongs in the bus
 
-### RPC
+The bus is responsible for:
+
+- accepting published events
+- binding to or creating an event loop
+- managing runtime lifecycle
+- transporting events into the application core
+- absorbing future remote transport or distributed delivery complexity
+
+That complexity belongs to the runtime layer. It should not leak into the application model.
+
+---
+
+## A Simple Mental Model
+
+You can think about FastEvents as three layers.
+
+### Runtime layer: bus
+
+The `bus` is the lowest runtime boundary.
+
+It decides how events are accepted, how runtime starts, who owns the loop, and how events enter the application core.
+
+### Application core: dispatcher + injector
+
+The application core turns an event into a concrete application call:
+
+- `dispatcher` selects matching subscribers
+- `injector` builds handler inputs from payload, context, and dependencies
+- then the actual call runs
+
+### Top layer: handlers + extensions
+
+- `handler` expresses business behavior
+- `extension` composes higher-level protocols, such as RPC, from public capabilities
+
+Both layers are built on the same application core rather than inventing separate models.
+
+---
+
+## Propagation Model
+
+FastEvents uses level-based propagation.
+
+Intuitively:
+
+- lower levels run first
+- subscribers in the same level run concurrently
+- `level < 0` is for observation and never consumes the event
+- `level >= 0` is for handling and fallback
+
+More concretely:
+
+- the dispatcher finds all matching subscribers
+- subscribers are grouped by `level`
+- each group runs concurrently
+- if a non-negative `level` consumes the event, higher levels stop
+- if that level does not consume the event, propagation continues upward
+
+Here, `consumed` is a propagation concept, not a broad business-success signal.
+
+A common convention is:
+
+- `-1`: audit, metrics, tracing, passive observers
+- `0`: primary business handler
+- `1+`: fallback
+
+---
+
+## Handler Injection
+
+FastEvents supports structured parameter injection. You declare a handler signature, and the framework builds the current inputs for you.
+
+Common forms:
+
+- `RuntimeEvent`: get the current event
+- `dict`: get the raw payload
+- `pydantic.BaseModel`: get validated structured payload
+
+Example:
+
+```python
+from pydantic import BaseModel
+from fastevents import RuntimeEvent
+
+
+class OrderCreated(BaseModel):
+    order_id: int
+
+
+@app.on("order.created")
+async def event_only(event: RuntimeEvent) -> None:
+    ...
+
+
+@app.on("order.created")
+async def raw_payload(payload: dict) -> None:
+    ...
+
+
+@app.on("order.created")
+async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
+    ...
+```
+
+If `pydantic` validation fails, the current handler is treated as declining the event, and propagation may continue to a higher level.
+
+---
+
+## Dependency Injection
+
+Besides payload and event context, FastEvents also supports lightweight function-style dependencies:
+
+```python
+from fastevents import EventContext, RuntimeEvent, dependency
+
+
+@dependency
+def order_ctx(event: RuntimeEvent, ctx: EventContext) -> tuple[str, bool]:
+    return (event.id, ctx is event.ctx)
+
+
+@app.on("order.created")
+async def handle(info=order_ctx()) -> None:
+    print(info)
+```
+
+Dependencies can themselves depend on:
+
+- the current event
+- `ctx`
+- payload injection
+- other dependencies
+
+Resolution is cached for one event dispatch, so multiple handlers handling the same event can reuse the same dependency result.
+
+---
+
+## `SessionNotConsumed` and Fallback
+
+If a primary handler wants to explicitly decline handling, it can raise `SessionNotConsumed`.
+
+This allows propagation to continue to a higher `level`, which makes fallback straightforward:
+
+```python
+from fastevents import SessionNotConsumed
+
+
+@app.on("user.lookup", level=0)
+async def primary(data: dict) -> None:
+    if data.get("source") == "legacy":
+        raise SessionNotConsumed()
+
+
+@app.on("user.lookup", level=1)
+async def fallback(event: RuntimeEvent, payload: dict) -> None:
+    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", **payload})
+```
+
+---
+
+## `RuntimeEvent` and `ctx`
+
+If a handler needs to keep talking to the bus - for example by publishing a follow-up event - it does so through `event.ctx`.
+
+The most common capability is:
+
+- `await event.ctx.publish(...)`
+
+Example:
+
+```python
+@app.on("order.created")
+async def handle(event: RuntimeEvent, payload: dict) -> None:
+    await event.ctx.publish(tags="order.validated", payload=payload)
+```
+
+This means handlers do not need to carry a direct bus reference, and runtime interaction stays behind a clear boundary.
+
+---
+
+## Bus Lifecycle
+
+In async environments:
+
+```python
+await bus.astart(app)
+try:
+    ...
+finally:
+    await bus.astop()
+```
+
+In synchronous environments:
+
+```python
+bus.start(app)
+try:
+    ...
+finally:
+    bus.stop()
+```
+
+You can also use `bus.run(app)` for a blocking runtime loop.
+
+Before the bus starts, calling `publish()`, or calling `app.publish()` / `app.listen()` before the app is bound to a running bus, raises `BusNotStartedError`.
+
+---
+
+## Listen
+
+`listen()` lives on `app` and creates a temporary stream subscriber:
+
+```python
+async with app.listen("notification.sent", level=-1) as stream:
+    async for event in stream:
+        print(event.payload)
+```
+
+This is useful when you want to observe a class of events at runtime without turning it into a permanent handler.
+
+---
+
+## RPC
 
 RPC is not the core model of FastEvents.
 
 It is a higher-level protocol built on top of events.
 
-The RPC extension provides helpers such as:
+The current RPC extension provides:
 
 - `request_stream()`
 - `request_one()`
 - `request()`
 - `rpc_context()`
 
-These build request/reply behavior without changing the core event semantics.
-
-### Proxies
-
-A proxy is not a bus extension.
-
-A proxy is a boundary adapter that can:
-
-- maintain connections to external systems
-- translate external events into internal events
-- forward internal events outward when appropriate
-
-This makes proxies part of the extension ecosystem rather than part of the transport core.
+These helpers build request/reply behavior on top of ordinary events without changing the core event semantics.
 
 ---
 
-## Why FastEvents exists
+## Minimal Example
 
-Modern Python web frameworks have already established an excellent application programming model for one special class of events: HTTP.
-
-FastEvents generalizes that model into a broader event-driven form.
-
-It keeps the strengths of that ecosystem:
-
-- clear runtime/application boundaries
-- declarative handlers
-- structured dependency injection
-- explicit lifecycle
-- composable higher-level protocols
-
-And it extends them with the flexibility of general event systems.
-
----
-
-## Minimal example
+If you only want the smallest publish example:
 
 ```python
 import asyncio
@@ -308,7 +454,10 @@ async def handle_message(payload: Message) -> None:
 
 async def main() -> None:
     await bus.astart(app)
-    await app.publish(tags="message", payload=Message(text="hello"))
+    try:
+        await app.publish(tags="message", payload=Message(text="hello"))
+    finally:
+        await bus.astop()
 
 
 asyncio.run(main())
@@ -316,9 +465,9 @@ asyncio.run(main())
 
 ---
 
-## A richer example
+## A More Realistic Example
 
-The demo shows a more realistic composition of:
+`demo.py` is closer to the real direction of the project. It combines:
 
 - dependency injection
 - streamed token events
@@ -326,25 +475,28 @@ The demo shows a more realistic composition of:
 - RPC request/reply
 - interactive terminal behavior
 
-That example is a better representation of the current direction of the project than a simple one-shot publish demo.
+If you want to understand how FastEvents feels in a more realistic application, run it directly:
+
+```bash
+uv run python demo.py
+```
 
 ---
 
-## Current status
+## Current Status
 
-FastEvents is evolving toward a clearer event-application model with stricter boundaries between runtime, application semantics, and extensions.
+FastEvents is evolving toward a clearer event-application model with stricter boundaries.
 
-If you are evaluating the project, the most important things to understand are:
+If you are evaluating it, the most important things to understand are:
 
-- `publish()` has intentionally weak guarantees
-- the bus owns runtime concerns
-- the app defines declaration and composition
+- `publish()` intentionally has weak guarantees
+- the bus owns runtime complexity
+- the app is for declaration and composition
 - extensions are explicit composition objects, not managed plugins
-- higher-level protocols should be built on top of events rather than pushed into the core model
+- higher-level protocols should be built on top of events rather than pushed into the core
 
 ---
 
-## Philosophy in one sentence
+## Philosophy in One Sentence
 
-FastEvents takes the application model proven by Python web frameworks, generalizes it from special events to general events, and keeps the boundaries explicit enough to remain composable.
-
+FastEvents takes the application model already proven in Python web frameworks, generalizes it from special events like HTTP to general event systems, and keeps the boundaries explicit enough to stay composable, extensible, and evolvable.
