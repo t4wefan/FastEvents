@@ -10,9 +10,6 @@ if TYPE_CHECKING:
 class AppExtensions:
     """Mount namespace for app-bound extensions."""
 
-    if TYPE_CHECKING:
-        rpc: RpcExtension
-
     def __init__(self, app: FastEvents) -> None:
         object.__setattr__(self, "_app", app)
 

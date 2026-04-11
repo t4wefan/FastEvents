@@ -1,30 +1,27 @@
+from __future__ import annotations
+
 import asyncio
 
 from pydantic import BaseModel
 
-from fastevents import FastEvents, InMemoryBus, RpcContext, RuntimeEvent, dependency, rpc_context
-from fastevents.ext.rpc import RpcExtension
+from fastevents import FastEvents, InMemoryBus, RuntimeEvent, dependency, rpc_context
+from fastevents.ext.rpc import RpcContext, RpcExtension
 
 
 app = FastEvents()
-app.ex.rpc = RpcExtension()
 bus = InMemoryBus()
+rpc = RpcExtension(app)
 
 
-class ChatTurn(BaseModel):
+class ChatRequest(BaseModel):
     session_id: str
     prompt: str
 
-class ChatDone(BaseModel):
-    session_id: str
-class Token(BaseModel):
-    session_id: str
-    token: str
 
-
-class ChatRuntime(BaseModel):
+class TokenChunk(BaseModel):
     session_id: str
-    prompt: str
+    index: int
+    text: str
 
 
 class ChatReply(BaseModel):
@@ -32,67 +29,62 @@ class ChatReply(BaseModel):
     answer: str
 
 
-def line(text: str = "") -> None:
-    print(text)
+@dependency
+def prompt_text(data: ChatRequest) -> str:
+    return data.prompt.strip()
 
 
 @dependency
-def chat_runtime(data: ChatTurn) -> ChatRuntime:
-    return ChatRuntime(session_id=data.session_id, prompt=data.prompt)
+def llm_answer(text: str = prompt_text()) -> str:
+    return f"Echo: {text}. FastEvents can stream tokens and send a final rpc reply."
 
 
-@app.on("chat.request", level=0, name="mock-llm")
-async def mock_llm(event: RuntimeEvent, rpc: RpcContext = rpc_context(), runtime: ChatRuntime = chat_runtime()) -> None:
-    text = (
-        f"You said: {runtime.prompt}. "
-        "This answer is generated as a stream of terminal events. "
-        "Each chunk becomes its own event before it is rendered.\n"
-    )
-    for chunk in str(text):
-        await event.ctx.publish(
-            tags="chat.token",
-            payload=Token(session_id=runtime.session_id, token=chunk),
-        )
-        await asyncio.sleep(0.001)
-    await rpc.reply(payload=ChatReply(session_id=runtime.session_id, answer=text))
+@app.on("chat.request")
+async def run_llm(event: RuntimeEvent, data: ChatRequest, rpc: RpcContext = rpc_context(), answer: str = llm_answer()) -> None:
+    for index, char in enumerate(answer):
+        await event.ctx.publish(tags="chat.token", payload=TokenChunk(session_id=data.session_id, index=index, text=char))
+        await asyncio.sleep(0.01)
+    await event.ctx.publish(tags="chat.done", payload={"session_id": data.session_id})
+    await rpc.reply(payload=ChatReply(session_id=data.session_id, answer=answer))
 
 
-@app.on("chat.token", level=0, name="terminal-renderer")
-async def render_token(event: RuntimeEvent, payload: Token) -> None:
-    print(payload.token, flush=True, end="")
+@app.on("chat.token")
+async def render_token(data: TokenChunk) -> None:
+    print(data.text, end="", flush=True)
 
 
-async def run_prompt(session_id: str, prompt: str) -> None:
-    line(f"\n> user: {prompt}")
-    reply = await app.ex.rpc.request_one(
-        tags="chat.request",
-        payload=ChatTurn(session_id=session_id, prompt=prompt),
-        model=ChatReply,
-    )
-    line(f"\n[reply] {reply.answer.strip()}")
-    print(f"{reply.session_id} is finished")
+@app.on("chat.done")
+async def render_done(event: RuntimeEvent) -> None:
+    print()
 
+@app.on("chat.bye")
+async def chat_bye() -> None:
+    print("bye")
 
-async def interactive_demo() -> None:
+async def main() -> None:
     await bus.astart(app)
-    line("streaming + rpc + dependency demo")
-    line("type a message, or /quit to exit")
-    counter = 0
     try:
+        print("FastEvents chat demo")
+        print("type a prompt, or /quit to exit")
+
+        session = 0
         while True:
-            prompt = await asyncio.to_thread(input, "\n> ")
-            if prompt.strip() in {"/quit", "/exit"}:
-                line("bye")
+            try:
+                prompt = input("\n> ")
+            except :
+                await rpc.request_one("chat.bye")
                 return
-            counter += 1
-            await run_prompt(session_id=f"interactive-{counter}", prompt=prompt)
+            if prompt.strip() in {"/quit", "/exit"}:
+                await rpc.request_one("chat.bye")
+                return
+            session += 1
+            request = ChatRequest(session_id=f"chat-{session}", prompt=prompt)
+            print("stream: ", end="", flush=True)
+            reply = await rpc.request_one("chat.request", ChatReply, payload=request)
+            # print(f"reply: {reply.answer}")
     except asyncio.exceptions.CancelledError:
-        line("bye")
         return
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(interactive_demo())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())

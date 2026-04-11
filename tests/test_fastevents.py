@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from fastevents import EventContext, FastEvents, InMemoryBus, RpcContext, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
 from fastevents.events import RuntimeEventView, new_event
 from fastevents.exceptions import InjectionError
-from fastevents.ext.rpc import RpcReplyNotAvailableError, RpcRequestTimeoutError
+from fastevents.ext.rpc import RpcExtension, RpcReplyNotAvailableError, RpcRequestTimeoutError
 from fastevents.subscribers import HandlerSubscriber
 from fastevents.subscription import normalize_tags
 
@@ -247,6 +247,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_request_returns_all_replies(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        rpc = RpcExtension(app)
 
         @app.on("user.lookup")
         async def lookup(rpc: Any = rpc_context()) -> None:
@@ -255,7 +256,6 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         await bus.astart(app)
         try:
-            rpc = getattr(app.ex, "rpc")
             replies = await rpc.request(tags="user.lookup", payload={"ok": True}, max_size=2)
             await bus.astop()
         finally:
@@ -267,6 +267,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_request_one_returns_first_reply(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        rpc = RpcExtension(app)
 
         @app.on("user.lookup")
         async def lookup(rpc: Any = rpc_context()) -> None:
@@ -275,7 +276,6 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         await bus.astart(app)
         try:
-            rpc = getattr(app.ex, "rpc")
             reply = await rpc.request_one(tags="user.lookup", payload={"ok": True})
             await bus.astop()
         finally:
@@ -287,6 +287,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_request_stream_yields_replies(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        rpc = RpcExtension(app)
 
         @app.on("user.lookup")
         async def lookup(rpc: Any = rpc_context()) -> None:
@@ -295,7 +296,6 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         await bus.astart(app)
         try:
-            rpc = getattr(app.ex, "rpc")
             stream = await rpc.request_stream(tags="user.lookup", payload={"ok": True}, max_size=2)
             try:
                 replies = [reply async for reply in stream]
@@ -311,10 +311,10 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_request_timeout_raises(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        rpc = RpcExtension(app)
 
         await bus.astart(app)
         try:
-            rpc = getattr(app.ex, "rpc")
             with self.assertRaises(RpcRequestTimeoutError):
                 await rpc.request_one(tags="missing.handler", payload={}, timeout=0.01)
         finally:
@@ -323,6 +323,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_request_can_validate_model(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()
+        rpc = RpcExtension(app)
 
         @app.on("user.lookup")
         async def lookup(rpc: Any = rpc_context()) -> None:
@@ -330,8 +331,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         await bus.astart(app)
         try:
-            rpc = getattr(app.ex, "rpc")
-            reply = await rpc.request_one(tags="user.lookup", payload={"ok": True}, model=LookupReply)
+            reply = await rpc.request_one("user.lookup", LookupReply, payload={"ok": True})
             await bus.astop()
         finally:
             if bus._started:  # type: ignore[attr-defined]

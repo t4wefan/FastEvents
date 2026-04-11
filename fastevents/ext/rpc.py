@@ -153,8 +153,8 @@ def rpc_context(event: RuntimeEvent, ctx: EventContext) -> RpcContext:
 
 
 class RpcExtension:
-    def __init__(self) -> None:
-        self._app: FastEvents | None = None
+    def __init__(self, app: FastEvents | None = None) -> None:
+        self._app: FastEvents | None = app
 
     def bind_app(self, app: FastEvents) -> None:
         self._app = app
@@ -221,35 +221,32 @@ class RpcExtension:
     @overload
     async def request_one(
         self,
-        *,
         tags: TagInput,
+        model: type[ReplyModelT],
         payload: Any = None,
         meta: dict[str, Any] | None = None,
         timeout: float | None = None,
-        model: type[ReplyModelT],
     ) -> ReplyModelT:
         ...
 
     @overload
     async def request_one(
         self,
-        *,
         tags: TagInput,
+        model: None = None,
         payload: Any = None,
         meta: dict[str, Any] | None = None,
         timeout: float | None = None,
-        model: None = None,
     ) -> StandardEvent:
         ...
 
     async def request_one(
         self,
-        *,
         tags: TagInput,
+        model: type[ReplyModelT] | None = None,
         payload: Any = None,
         meta: dict[str, Any] | None = None,
         timeout: float | None = None,
-        model: type[ReplyModelT] | None = None,
     ) -> StandardEvent | ReplyModelT:
         stream = await self.request_stream(tags=tags, payload=payload, meta=meta, timeout=timeout, max_size=1, model=model)
         try:

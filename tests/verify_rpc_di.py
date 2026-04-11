@@ -19,7 +19,8 @@ class LookupReply(BaseModel):
 
 async def main() -> None:
     app = FastEvents()
-    app.ex.rpc = RpcExtension()
+    rpc = RpcExtension(app)
+    app.ex.rpc = rpc
     bus = InMemoryBus()
 
     timeline: list[str] = []
@@ -68,10 +69,8 @@ async def main() -> None:
             observed = await stream.get()
             timeline.append(f"listen:{observed.payload['order_id']}")
 
-        rpc = app.ex.rpc # type: ignore
-
         many = await rpc.request(tags="user.lookup", payload={"mode": "many"}, max_size=2)
-        one = await rpc.request_one(tags="user.lookup", payload={"user_id": 9}, model=LookupReply)
+        one = await rpc.request_one("user.lookup", LookupReply, payload={"user_id": 9})
 
         stream = await rpc.request_stream(tags="user.lookup", payload={"mode": "many"}, max_size=2)
         try:
