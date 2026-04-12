@@ -39,12 +39,12 @@ The current implementation targets Python `3.12+` and ships with an in-memory `I
 Start with the smallest possible hello world:
 
 ```python
-from fastevents import FastEvents, RuntimeEvent
+from fastevents import FastEvents
 
 app = FastEvents()
 
 @app.on("hello")
-async def hello(event: RuntimeEvent) -> None:
+async def hello() -> None:
     print("hello world")
 ```
 
