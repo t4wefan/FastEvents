@@ -2,7 +2,7 @@ from .app import FastEvents
 from .bus import Bus, InMemoryBus
 from .dispatcher import Dispatcher, DispatcherSnapshot, SubscriberSnapshot
 from .events import EventContext, RuntimeEvent, StandardEvent, new_event
-from .ext.rpc import RpcContext, RpcExtension, RpcReplyNotAvailableError, RpcRequestTimeoutError, rpc_context
+# from .ext.rpc import RpcContext, RpcExtension, RpcReplyNotAvailableError, RpcRequestTimeoutError, rpc_context
 from .exceptions import (
     BusAlreadyStartedError,
     BusNotStartedError,
@@ -22,10 +22,6 @@ __all__ = [
     "FastEvents",
     "InMemoryBus",
     "InjectionError",
-    "RpcContext",
-    "RpcExtension",
-    "RpcReplyNotAvailableError",
-    "RpcRequestTimeoutError",
     "RuntimeEvent",
     "SessionNotConsumed",
     "StandardEvent",
@@ -33,5 +29,4 @@ __all__ = [
     "SubscriberSnapshot",
     "dependency",
     "new_event",
-    "rpc_context",
 ]
