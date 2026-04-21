@@ -21,14 +21,11 @@ FastEvents 不只是一个 event bus。
 如果你直接从仓库使用：
 
 ```bash
-uv add https://github.com/t4wefan/FastEvents.git
+uv add fastevents
+# or using pip
+# pip install fastevents
 ```
 
-本地开发：
-
-```bash
-uv sync
-```
 
 当前实现基于 Python `3.12+`，并内置一个内存版 `InMemoryBus`。
 

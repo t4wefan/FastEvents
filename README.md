@@ -21,14 +21,11 @@ If you like the feel of modern Python web frameworks - clear handlers, natural d
 If you want to use the repository directly:
 
 ```bash
-uv add https://github.com/t4wefan/FastEvents.git
+uv add fastevents
+# or using pip
+# pip install fastevents
 ```
 
-For local development:
-
-```bash
-uv sync
-```
 
 The current implementation targets Python `3.12+` and ships with an in-memory `InMemoryBus`.
 
