@@ -71,7 +71,7 @@ async def main() -> None:
         while True:
             try:
                 prompt = input("\n> ")
-            except :
+            except :  # noqa: E722
                 await rpc.request_one("chat.bye")
                 return
             if prompt.strip() in {"/quit", "/exit"}:
@@ -80,7 +80,7 @@ async def main() -> None:
             session += 1
             request = ChatRequest(session_id=f"chat-{session}", prompt=prompt)
             print("stream: ", end="", flush=True)
-            reply = await rpc.request_one("chat.request", ChatReply, payload=request)
+            await rpc.request_one("chat.request", ChatReply, payload=request)
             # print(f"reply: {reply.answer}")
     except asyncio.exceptions.CancelledError:
         return
