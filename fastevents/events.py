@@ -24,11 +24,11 @@ class StandardEvent:
     payload: Any = None
 
 
-ScalarEventValue = None | bool | int | float | str
+ScalarEventValue = None | bool | int | float | str | bytes
 
 
 def _is_bus_scalar(value: Any) -> bool:
-    return value is None or isinstance(value, bool | int | float | str)
+    return value is None or isinstance(value, bool | int | float | str | bytes)
 
 
 def _normalize_json_compatible(value: Any) -> Any:

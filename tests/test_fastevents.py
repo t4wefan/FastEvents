@@ -397,6 +397,44 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen, [{"order_id": 7, "note": "ok"}])
 
+    async def test_bytes_payload_can_be_injected_directly(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[bytes] = []
+
+        @app.on("bytes.payload")
+        async def handle(payload: bytes) -> None:
+            seen.append(payload)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="bytes.payload", payload=b"hello")
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [b"hello"])
+
+    async def test_dict_payload_can_be_injected_directly(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[dict[str, Any]] = []
+
+        @app.on("dict.payload")
+        async def handle(payload: dict) -> None:
+            seen.append(payload)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="dict.payload", payload={"a": 1, "b": True})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [{"a": 1, "b": True}])
+
     async def test_rpc_request_returns_all_replies(self) -> None:
         app = FastEvents()
         bus = InMemoryBus()

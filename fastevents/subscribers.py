@@ -72,6 +72,10 @@ def _is_basemodel_type(annotation: Any) -> bool:
     return issubclass(annotation, BaseModel)
 
 
+def _is_quick_payload_annotation(annotation: Any) -> bool:
+    return annotation in {dict, list, tuple, str, int, float, bool, bytes}
+
+
 class HandlerSubscriber:
     """Handler-backed subscriber with lightweight dependency resolution."""
 
@@ -140,7 +144,7 @@ class HandlerSubscriber:
                     raise InjectionError("required parameters must be injectable")
                 continue
 
-            if _is_runtime_event_annotation(annotation) or _is_basemodel_type(annotation) or _get_annotation_provider(annotation) is not None:
+            if _is_runtime_event_annotation(annotation) or _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation) or _get_annotation_provider(annotation) is not None:
                 continue
 
             if parameter.default is inspect.Signature.empty:
@@ -211,7 +215,7 @@ class _DependencyResolver:
                 event_param_used = True
                 continue
 
-            if _is_basemodel_type(annotation):
+            if _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation):
                 if payload_param_used:
                     raise InjectionError("only one payload parameter is allowed")
                 kwargs[parameter.name] = self._resolve_payload(annotation)
@@ -251,8 +255,30 @@ class _DependencyResolver:
             self._scope.resolving.remove(dependency)
 
     def _resolve_payload(self, annotation: Any) -> Any:
+        payload = self._scope.event.payload
+
+        if annotation is dict:
+            if not isinstance(payload, dict):
+                raise InjectionError("payload is not a dict")
+            return payload
+
+        if annotation is list:
+            if not isinstance(payload, list):
+                raise InjectionError("payload is not a list")
+            return payload
+
+        if annotation is tuple:
+            if not isinstance(payload, tuple):
+                raise InjectionError("payload is not a tuple")
+            return payload
+
+        if annotation in {str, int, float, bool, bytes}:
+            if not isinstance(payload, annotation):
+                raise InjectionError(f"payload is not a {annotation.__name__}")
+            return payload
+
         if _is_basemodel_type(annotation):
-            return annotation.model_validate(self._scope.event.payload)
+            return annotation.model_validate(payload)
 
         raise InjectionError("unsupported payload annotation")
 
