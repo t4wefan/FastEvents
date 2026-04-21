@@ -178,8 +178,7 @@ extension 应该是普通对象，它们基于 `app` 的公开能力组合出更
 推荐的方向是显式构造：
 
 ```python
-from fastevents import FastEvents
-from fastevents.ext.rpc import RpcExtension
+from fastevents import FastEvents, RpcExtension
 
 app = FastEvents()
 rpc = RpcExtension(app)
@@ -423,6 +422,8 @@ RPC 不是 FastEvents 的核心模型。
 - `request_one()`
 - `request()`
 - `rpc_context()`
+
+第一方 RPC 能力现在也可以直接从 [`fastevents/__init__.py`](fastevents/__init__.py) 导入。
 
 这些能力让 request/reply 模式可以建立在普通事件之上，而不会反过来污染核心事件语义。
 

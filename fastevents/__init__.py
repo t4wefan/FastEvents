@@ -9,6 +9,7 @@ from .exceptions import (
     InjectionError,
     SessionNotConsumed,
 )
+from .models import EventModel
 from .subscribers import EventStream, SubscriberResult, dependency
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "Dispatcher",
     "DispatcherSnapshot",
     "EventContext",
+    "EventModel",
     "EventStream",
     "FastEvents",
     "InMemoryBus",

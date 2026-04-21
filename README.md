@@ -178,8 +178,7 @@ Extensions should be ordinary objects that compose higher-level behavior from th
 The recommended direction is explicit construction:
 
 ```python
-from fastevents import FastEvents
-from fastevents.ext.rpc import RpcExtension
+from fastevents import FastEvents, RpcExtension
 
 app = FastEvents()
 rpc = RpcExtension(app)
@@ -423,6 +422,8 @@ The current RPC extension provides:
 - `request_one()`
 - `request()`
 - `rpc_context()`
+
+You can import the first-party RPC surface directly from [`fastevents/__init__.py`](fastevents/__init__.py).
 
 These helpers build request/reply behavior on top of ordinary events without changing the core event semantics.
 

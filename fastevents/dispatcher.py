@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from .events import EventContext, RuntimeEventView, StandardEvent
+from .events import EventContext, RuntimeEventView, StandardEvent, format_event_debug
 from .subscribers import DependencyScope, Subscriber, SubscriberResult
 
 logger = logging.getLogger(__name__)
@@ -33,15 +33,21 @@ class DispatcherSnapshot:
 class Dispatcher:
     """Semantic core that matches subscribers and applies level propagation."""
 
-    def __init__(self, *, runtime_publisher, error_hook: ErrorHook | None = None) -> None:
+    def __init__(self, *, runtime_publisher, error_hook: ErrorHook | None = None, debug: bool = False, debug_printer: Callable[[str], None] | None = None) -> None:
         self._subscribers: dict[str, Subscriber] = {}
         self._runtime_publisher = runtime_publisher
         self._error_hook = error_hook
+        self._debug = debug
+        self._debug_printer = debug_printer
 
     def bind_runtime_publisher(self, publisher) -> None:
         """Bind the runtime publisher used to build handler event contexts."""
 
         self._runtime_publisher = publisher
+
+    def set_debug(self, debug: bool, debug_printer: Callable[[str], None] | None) -> None:
+        self._debug = debug
+        self._debug_printer = debug_printer
 
     def add_subscriber(self, subscriber: Subscriber) -> Subscriber:
         """Register one subscriber in the dispatcher registry."""
@@ -77,6 +83,9 @@ class Dispatcher:
             for subscriber in self._subscribers.values()
             if not subscriber.closed and subscriber.should_handle(event)
         ]
+        self._emit_debug(
+            f"dispatch start {format_event_debug(event)} matched={[self._subscriber_label(subscriber) for subscriber in matched]}"
+        )
         if not matched:
             return
 
@@ -85,8 +94,11 @@ class Dispatcher:
             groups.setdefault(subscriber.level, []).append(subscriber)
 
         runtime_event = RuntimeEventView(event, EventContext(self._runtime_publisher, event))
-        dependency_scope = DependencyScope(event=runtime_event, cache={}, resolving=set())
+        dependency_scope = DependencyScope(event=runtime_event, cache={}, resolving=set(), debug=self._emit_debug if self._debug else None)
         for level in sorted(groups):
+            self._emit_debug(
+                f"dispatch level={level} subscribers={[self._subscriber_label(subscriber) for subscriber in groups[level]]}"
+            )
             results = await asyncio.gather(
                 *(subscriber.handle(runtime_event, dependency_scope) for subscriber in groups[level]),
                 return_exceptions=True,
@@ -99,10 +111,15 @@ class Dispatcher:
                     actual = result
                 if actual.exc is not None:
                     await self._report_error(event, subscriber, actual.exc)
+                self._emit_debug(
+                    f"dispatch result subscriber={self._subscriber_label(subscriber)} level={level} consumed={actual.consumed} exc={actual.exc!r}"
+                )
                 if level >= 0 and actual.consumed:
                     level_consumed = True
             if level >= 0 and level_consumed:
+                self._emit_debug(f"dispatch stopped at level={level} event={event.id}")
                 return
+        self._emit_debug(f"dispatch completed event={event.id}")
 
     async def _report_error(self, event: StandardEvent, subscriber: Subscriber, exc: BaseException) -> None:
         if self._error_hook is None:
@@ -111,3 +128,10 @@ class Dispatcher:
         result = self._error_hook(event, subscriber, exc)
         if asyncio.iscoroutine(result):
             await result
+
+    def _emit_debug(self, message: str) -> None:
+        if self._debug and self._debug_printer is not None:
+            self._debug_printer(message)
+
+    def _subscriber_label(self, subscriber: Subscriber) -> str:
+        return subscriber.name or subscriber.id

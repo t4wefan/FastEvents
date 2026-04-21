@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from .app import FastEvents
-from .events import StandardEvent, new_event
+from .events import StandardEvent, format_event_debug, new_event
 from .exceptions import BusAlreadyStartedError, BusNotStartedError
 from .subscribers import EventStream
 from .subscription import SubscriptionInput, TagInput
@@ -215,6 +215,8 @@ class InMemoryBus(Bus):
         await self._ensure_runtime_ready()
         self._ensure_publish_allowed()
         event = new_event(tags=tags, payload=payload, meta=meta, id=id, timestamp=timestamp)
+        if self._app is not None and self._app.debug:
+            self._app._debug_log(f"outgoing {format_event_debug(event)}")  # type: ignore[attr-defined]
         await self.send(event)
         return event
 
@@ -247,6 +249,8 @@ class InMemoryBus(Bus):
         """
         self._ensure_runtime_bound()
         app = self._require_app()
+        if app.debug:
+            app._debug_log(f"incoming {format_event_debug(event)}")  # type: ignore[attr-defined]
         token = _runtime_publish_scope.set(_runtime_publish_scope.get() + 1)
         try:
             await app.dispatcher.dispatch(event)

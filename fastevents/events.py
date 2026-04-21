@@ -78,6 +78,16 @@ class EventContext:
             timestamp=timestamp,
         )
 
+    @staticmethod
+    def _provider():
+        from .subscribers import dependency
+
+        @dependency
+        def provider(event: RuntimeEvent) -> EventContext:
+            return event.ctx
+
+        return provider
+
 
 class RuntimeEvent(Protocol):
     @property
@@ -125,3 +135,9 @@ class RuntimeEventView:
     @property
     def payload(self) -> Any:
         return self._event.payload
+
+
+def format_event_debug(event: StandardEvent | RuntimeEvent) -> str:
+    return (
+        f"id={event.id} tags={event.tags} payload={event.payload!r} meta={dict(event.meta)!r}"
+    )

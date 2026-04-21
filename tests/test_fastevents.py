@@ -1,26 +1,60 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import unittest
 from typing import Any
 
 from pydantic import BaseModel
 
-from fastevents import EventContext, FastEvents, InMemoryBus, RpcContext, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
+from fastevents import EventContext, EventModel, FastEvents, InMemoryBus, RpcContext, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
 from fastevents.events import RuntimeEventView, new_event
-from fastevents.exceptions import InjectionError
 from fastevents.ext.rpc import RpcExtension, RpcReplyNotAvailableError, RpcRequestTimeoutError
 from fastevents.subscribers import HandlerSubscriber
 from fastevents.subscription import normalize_tags
 
 
-class OrderPayload(BaseModel):
+class OrderPayload(EventModel):
     order_id: int
 
 
-class LookupReply(BaseModel):
+class LookupReply(EventModel):
     user_id: int
     name: str
+
+
+class FallbackPayload(EventModel):
+    raw: str
+
+
+class LookupRequest(BaseModel):
+    user_id: int | None = None
+    ok: bool | None = None
+    mode: str | None = None
+
+
+class CorrelationId:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    @staticmethod
+    def _provider():
+        @dependency
+        def provider(event: RuntimeEvent) -> CorrelationId:
+            return CorrelationId(str(event.meta["cid"]))
+
+        return provider
+
+
+class BrokenDependency:
+    @staticmethod
+    def _provider():
+        @dependency
+        def provider() -> BrokenDependency:
+            raise RuntimeError("boom")
+
+        return provider
 
 
 class FastEventsTests(unittest.IsolatedAsyncioTestCase):
@@ -85,8 +119,8 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
             seen.append(f"model:{data.order_id}")
 
         @app.on("order.created", level=1)
-        async def fallback(payload: dict):
-            seen.append(f"fallback:{payload['raw']}")
+        async def fallback(payload: FallbackPayload):
+            seen.append(f"fallback:{payload.raw}")
 
         await bus.astart(app)
         try:
@@ -104,8 +138,8 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         seen: list[dict] = []
 
         @app.on("user.lookup")
-        async def lookup(payload: dict) -> None:
-            seen.append(payload)
+        async def lookup(payload: LookupRequest) -> None:
+            seen.append(payload.model_dump(exclude_none=True))
 
         await bus.astart(app)
         try:
@@ -159,6 +193,25 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
                 await bus.astop()
 
         self.assertEqual(seen, [(7, True)])
+
+    async def test_custom_type_provider_can_inject_annotation(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("provider.test")
+        async def handle(cid: CorrelationId) -> None:
+            seen.append(cid.value)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="provider.test", payload={}, meta={"cid": "abc-123"})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, ["abc-123"])
 
     async def test_dependency_result_is_cached_per_handler_call(self) -> None:
         app = FastEvents()
@@ -241,8 +294,61 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         result = await subscriber.handle(runtime_event)
 
-        self.assertTrue(result.consumed)
-        self.assertIsInstance(result.exc, InjectionError)
+        self.assertFalse(result.consumed)
+        self.assertIsNone(result.exc)
+
+    async def test_injection_error_is_absorbed_and_allows_fallback(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("broken.provider", level=0)
+        async def primary(dep: BrokenDependency) -> None:
+            seen.append("primary")
+
+        @app.on("broken.provider", level=1)
+        async def fallback(payload: OrderPayload) -> None:
+            seen.append(f"fallback:{payload.order_id}")
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="broken.provider", payload={"order_id": 9})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, ["fallback:9"])
+
+    async def test_debug_logs_flow_dispatch_and_absorbed_injection_errors(self) -> None:
+        app = FastEvents(debug=True)
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("debug.trace", level=0)
+        async def primary(dep: BrokenDependency) -> None:
+            seen.append("primary")
+
+        @app.on("debug.trace", level=1)
+        async def fallback(payload: OrderPayload) -> None:
+            seen.append(f"fallback:{payload.order_id}")
+
+        output = io.StringIO()
+        await bus.astart(app)
+        try:
+            with contextlib.redirect_stdout(output):
+                await app.publish(tags="debug.trace", payload={"order_id": 3})
+                await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        debug_output = output.getvalue()
+        self.assertEqual(seen, ["fallback:3"])
+        self.assertIn("outgoing", debug_output)
+        self.assertIn("incoming", debug_output)
+        self.assertIn("dispatch level=0", debug_output)
+        self.assertIn("absorbed injection error", debug_output)
 
     async def test_rpc_request_returns_all_replies(self) -> None:
         app = FastEvents()
@@ -250,7 +356,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         rpc = RpcExtension(app)
 
         @app.on("user.lookup")
-        async def lookup(rpc: Any = rpc_context()) -> None:
+        async def lookup(payload: LookupRequest, rpc: Any = rpc_context()) -> None:
             await rpc.reply(payload={"user_id": 1, "name": "Alice"})
             await rpc.reply(payload={"user_id": 2, "name": "Bob"})
 
@@ -270,7 +376,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         rpc = RpcExtension(app)
 
         @app.on("user.lookup")
-        async def lookup(rpc: Any = rpc_context()) -> None:
+        async def lookup(payload: LookupRequest, rpc: Any = rpc_context()) -> None:
             await rpc.reply(payload={"user_id": 7, "name": "Alice"})
             await rpc.reply(payload={"user_id": 8, "name": "Bob"})
 
@@ -290,7 +396,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         rpc = RpcExtension(app)
 
         @app.on("user.lookup")
-        async def lookup(rpc: Any = rpc_context()) -> None:
+        async def lookup(payload: LookupRequest, rpc: Any = rpc_context()) -> None:
             await rpc.reply(payload={"user_id": 1, "name": "Alice"})
             await rpc.reply(payload={"user_id": 2, "name": "Bob"})
 
@@ -326,7 +432,7 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         rpc = RpcExtension(app)
 
         @app.on("user.lookup")
-        async def lookup(rpc: Any = rpc_context()) -> None:
+        async def lookup(payload: LookupRequest, rpc: Any = rpc_context()) -> None:
             await rpc.reply(payload={"user_id": 7, "name": "Alice"})
 
         await bus.astart(app)

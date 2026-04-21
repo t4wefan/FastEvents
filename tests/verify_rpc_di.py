@@ -4,17 +4,22 @@ import asyncio
 
 from pydantic import BaseModel
 
-from fastevents import EventContext, FastEvents, InMemoryBus, RpcContext, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
+from fastevents import EventContext, EventModel, FastEvents, InMemoryBus, RuntimeEvent, SessionNotConsumed, dependency, rpc_context
 from fastevents.ext.rpc import RpcExtension, RpcRequestTimeoutError
 
 
-class OrderPayload(BaseModel):
+class OrderPayload(EventModel):
     order_id: int
 
 
-class LookupReply(BaseModel):
+class LookupReply(EventModel):
     user_id: int
     name: str
+
+
+class LookupRequest(BaseModel):
+    user_id: int | None = None
+    mode: str | None = None
 
 
 async def main() -> None:
@@ -48,12 +53,12 @@ async def main() -> None:
         timeline.append(f"fallback:{counter}")
 
     @app.on("user.lookup")
-    async def lookup(payload: dict, rpc = rpc_context()) -> None:
-        if payload.get("mode") == "many":
+    async def lookup(payload: LookupRequest, rpc = rpc_context()) -> None:
+        if payload.mode == "many":
             await rpc.reply(payload={"user_id": 1, "name": "Alice"})
             await rpc.reply(payload={"user_id": 2, "name": "Bob"})
             return
-        await rpc.reply(payload={"user_id": payload["user_id"], "name": "Alice"})
+        await rpc.reply(payload={"user_id": payload.user_id, "name": "Alice"})
 
     @app.on("order.created.fallback")
     async def fallback_projection(event: RuntimeEvent) -> None:

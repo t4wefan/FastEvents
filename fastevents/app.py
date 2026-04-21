@@ -18,8 +18,9 @@ if TYPE_CHECKING:
 class FastEvents:
     """Declaration facade used to register event subscribers."""
 
-    def __init__(self) -> None:
-        self.dispatcher = Dispatcher(runtime_publisher=None)
+    def __init__(self, *, debug: bool = False) -> None:
+        self.debug = debug
+        self.dispatcher = Dispatcher(runtime_publisher=None, debug=debug, debug_printer=self._debug_log)
         self._runtime_bus: Bus | None = None
 
     def on(
@@ -94,6 +95,10 @@ class FastEvents:
 
     def _bind_runtime_bus(self, bus: Bus | None) -> None:
         self._runtime_bus = bus
+
+    def _debug_log(self, message: str) -> None:
+        if self.debug:
+            print(f"[FastEvents] {message}")
 
     def _require_runtime_bus(self) -> Bus:
         if self._runtime_bus is None:

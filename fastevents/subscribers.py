@@ -5,9 +5,9 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from functools import update_wrapper
-from typing import Any, Generic, Protocol, TypeVar, cast, get_origin, get_type_hints
+from typing import Any, Generic, Protocol, TypeVar, cast, get_type_hints
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from .events import EventContext, RuntimeEvent, StandardEvent
 from .exceptions import InjectionError, SessionNotConsumed
@@ -47,6 +47,7 @@ class DependencyScope:
     event: RuntimeEvent
     cache: dict[Dependency[Any], Any]
     resolving: set[Dependency[Any]]
+    debug: Callable[[str], None] | None = None
 
 
 class Dependency(Generic[DependencyValueT]):
@@ -69,10 +70,6 @@ def _is_basemodel_type(annotation: Any) -> bool:
     if not inspect.isclass(annotation):
         return False
     return issubclass(annotation, BaseModel)
-
-
-def _validate_basemodel(annotation: Any, payload: Any) -> Any:
-    return annotation.model_validate(payload)
 
 
 class HandlerSubscriber:
@@ -105,10 +102,10 @@ class HandlerSubscriber:
         try:
             scope = dependency_scope or DependencyScope(event=event, cache={}, resolving=set())
             kwargs = await _DependencyResolver(scope).build_kwargs(self._callback)
-        except _RecoverableInjectionFailure:
-            return SubscriberResult(consumed=False, exc=None)
         except Exception as exc:
-            return SubscriberResult(consumed=True, exc=exc)
+            if scope.debug is not None:
+                scope.debug(f"absorbed injection error subscriber={self.name or self.id} exc={exc!r}")
+            return SubscriberResult(consumed=False, exc=None)
 
         try:
             await self._callback(**kwargs)
@@ -143,23 +140,38 @@ class HandlerSubscriber:
                     raise InjectionError("required parameters must be injectable")
                 continue
 
-            if _is_event_annotation(annotation) or _is_context_annotation(annotation):
-                continue
-
-            origin = get_origin(annotation)
-            if annotation is dict or origin is dict or _is_basemodel_type(annotation):
+            if _is_runtime_event_annotation(annotation) or _is_basemodel_type(annotation) or _get_annotation_provider(annotation) is not None:
                 continue
 
             if parameter.default is inspect.Signature.empty:
                 raise InjectionError(f"unsupported required parameter: {parameter.name}")
 
 
-def _is_event_annotation(annotation: Any) -> bool:
-    return annotation is RuntimeEvent or annotation is StandardEvent or getattr(annotation, "__name__", None) == "Event"
+def _is_runtime_event_annotation(annotation: Any) -> bool:
+    return annotation is RuntimeEvent or annotation is StandardEvent or getattr(annotation, "__name__", None) == "RuntimeEvent"
 
 
-def _is_context_annotation(annotation: Any) -> bool:
-    return annotation is EventContext
+def _get_annotation_provider(annotation: Any) -> Dependency[Any] | None:
+    if not inspect.isclass(annotation):
+        return None
+    raw_provider = annotation.__dict__.get("_provider")
+    if raw_provider is None:
+        return None
+    if not isinstance(raw_provider, staticmethod):
+        raise InjectionError(f"{annotation.__name__}._provider must be a staticmethod")
+    provider_factory = raw_provider.__get__(None, annotation)
+    signature = inspect.signature(provider_factory)
+    positional_parameters = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if positional_parameters:
+        raise InjectionError(f"{annotation.__name__}._provider must accept no positional arguments")
+    provider = provider_factory()
+    if not isinstance(provider, Dependency):
+        raise InjectionError(f"{annotation.__name__}._provider must return a dependency")
+    return provider
 
 
 class _DependencyResolver:
@@ -192,26 +204,27 @@ class _DependencyResolver:
                     raise InjectionError("required parameters must be injectable")
                 continue
 
-            if _is_event_annotation(annotation):
+            if _is_runtime_event_annotation(annotation):
                 if event_param_used:
                     raise InjectionError("only one event parameter is allowed")
                 kwargs[parameter.name] = self._scope.event
                 event_param_used = True
                 continue
 
-            if _is_context_annotation(annotation):
-                if ctx_param_used:
-                    raise InjectionError("only one context parameter is allowed")
-                kwargs[parameter.name] = self._scope.event.ctx
-                ctx_param_used = True
-                continue
-
-            origin = get_origin(annotation)
-            if annotation is dict or origin is dict or _is_basemodel_type(annotation):
+            if _is_basemodel_type(annotation):
                 if payload_param_used:
                     raise InjectionError("only one payload parameter is allowed")
                 kwargs[parameter.name] = self._resolve_payload(annotation)
                 payload_param_used = True
+                continue
+
+            annotation_provider = _get_annotation_provider(annotation)
+            if annotation_provider is not None:
+                if annotation is EventContext:
+                    if ctx_param_used:
+                        raise InjectionError("only one context parameter is allowed")
+                    ctx_param_used = True
+                kwargs[parameter.name] = await self.resolve_dependency(annotation_provider)
                 continue
 
             if parameter.default is inspect.Signature.empty:
@@ -238,28 +251,13 @@ class _DependencyResolver:
             self._scope.resolving.remove(dependency)
 
     def _resolve_payload(self, annotation: Any) -> Any:
-        payload = self._scope.event.payload
-        if annotation is dict or get_origin(annotation) is dict:
-            if not isinstance(payload, dict):
-                raise _RecoverableInjectionFailure()
-            return payload
-
         if _is_basemodel_type(annotation):
-            try:
-                return _validate_basemodel(annotation, payload)
-            except Exception as exc:  # pragma: no branch
-                if isinstance(exc, ValidationError):
-                    raise _RecoverableInjectionFailure() from exc
-                raise
+            return annotation.model_validate(self._scope.event.payload)
 
         raise InjectionError("unsupported payload annotation")
 
 
 _MISSING = object()
-
-
-class _RecoverableInjectionFailure(Exception):
-    pass
 
 
 class EventStream(AsyncIterator[RuntimeEvent]):
