@@ -185,7 +185,7 @@ app = FastEvents()
 rpc = RpcExtension(app)
 ```
 
-相比历史上的 `app.ex` 风格，这种方式更清晰，也更利于类型推断。
+这种显式组合方式更清晰，也更利于类型推断。
 
 ### 4. runtime complexity 属于 bus
 

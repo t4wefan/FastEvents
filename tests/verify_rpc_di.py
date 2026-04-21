@@ -20,7 +20,6 @@ class LookupReply(BaseModel):
 async def main() -> None:
     app = FastEvents()
     rpc = RpcExtension(app)
-    app.ex.rpc = rpc
     bus = InMemoryBus()
 
     timeline: list[str] = []

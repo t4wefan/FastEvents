@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from .dispatcher import Dispatcher
 from .events import StandardEvent
-from .extensions import AppExtensions
 from .exceptions import BusNotStartedError
 from .subscribers import EventStream, HandlerSubscriber, StreamSubscriber
 from .subscription import SubscriptionInput, TagInput
@@ -22,7 +21,6 @@ class FastEvents:
     def __init__(self) -> None:
         self.dispatcher = Dispatcher(runtime_publisher=None)
         self._runtime_bus: Bus | None = None
-        self.ex = AppExtensions(self)
 
     def on(
         self,

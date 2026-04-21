@@ -94,7 +94,7 @@ depends on `app`, not on `bus`.
 
 ### 3.4 Extensions are app-bound
 
-`app.ex` is an extension mount namespace.
+Extension composition should stay explicit instead of using a mount namespace.
 
 It is not:
 
@@ -102,7 +102,7 @@ It is not:
 - a plugin lifecycle container
 - a place to expose `bus`
 
-Mounted extensions receive `app` and use app-exposed capabilities.
+Extensions receive `app` and use app-exposed capabilities.
 If an extension needs extra initialization or resource handling, that logic is
 internal to the extension and not part of a core lifecycle contract.
 
@@ -132,7 +132,7 @@ pattern, not as a core API.
 
 Likely future form:
 
-- `app.ex.rpc.request(...)`
+- `rpc.request(...)`
 - `RpcContext.reply(...)`
 
 ## 5. Core Areas To Keep Stable
@@ -221,19 +221,19 @@ Minimum built-in injectable sources:
 - minimal runtime context
 - other dependencies
 
-### 6.3 Extension mount surface
+### 6.3 Explicit extension composition
 
-Add an `app.ex` mount namespace with minimal behavior.
+Keep extension composition explicit.
 
 Requirements:
 
-- extensions can be mounted under `app.ex`
-- mounted extensions receive `app`
-- extensions cannot directly access bus internals through the mount surface
+- extensions are constructed explicitly with `app`
+- extensions receive `app`
+- extensions cannot directly access bus internals
 
 ### 6.4 Future sample extension target
 
-After DI v1 and `app.ex` exist, implement one official sample extension.
+After DI v1 stabilizes, implement one official sample extension.
 
 Preferred target:
 
@@ -254,7 +254,6 @@ This file will become the main focus of the public boundary redesign.
 Changes needed:
 
 - add `app.publish(...)`
-- add `app.ex`
 - keep runtime binding internal
 - remove `request(...)`
 - decide whether `listen(...)` remains core; current recommendation is to keep
@@ -413,13 +412,12 @@ Goal:
 
 Tasks:
 
-- add `app.ex`
-- define extension mounting behavior
-- ensure mounted extensions receive app only
+- define explicit extension construction behavior
+- ensure extensions receive app only
 
 Completion signal:
 
-- extensions can be mounted without runtime leakage
+- extensions can be composed without runtime leakage
 
 ### Phase 5: Official sample extension
 
@@ -430,7 +428,7 @@ Goal:
 Tasks:
 
 - implement rpc as an extension
-- expose app-side API through `app.ex.rpc`
+- expose app-side API through `rpc`
 - expose handler-side API through a DI-resolved typed context
 
 Completion signal:
@@ -451,9 +449,9 @@ or dispatcher under a different name.
 No direct bus reference should become the normal programming model for
 extensions.
 
-### 9.3 Do not turn `app.ex` into a lifecycle framework
+### 9.3 Do not turn extension composition into a lifecycle framework
 
-`app.ex` is a mount namespace, not a plugin manager.
+Explicit extension composition is not a plugin manager.
 
 ### 9.4 Do not grow `ctx` into a universal surface
 
@@ -497,8 +495,8 @@ feature work.
 
 ### 10.4 After Phase 4
 
-- mounted extensions receive app
-- mounted extensions do not rely on direct bus access
+- extensions receive app
+- extensions do not rely on direct bus access
 
 ### 10.5 After Phase 5
 
@@ -513,10 +511,10 @@ The next implementation steps should be taken in this order:
 2. add `app.publish(...)`
 3. update docs to reflect the new boundary
 4. refactor injection toward DI v1
-5. add `app.ex`
+5. keep extension construction explicit
 6. rebuild rpc as an extension sample
 
 This order matters.
 Without app-side publish, extension isolation is incomplete.
 Without DI v1, typed extension contexts have no proper landing point.
-Without both, `app.ex` remains only a name and not a usable extension surface.
+Without both, explicit extension composition would remain only a guideline and not a usable extension surface.

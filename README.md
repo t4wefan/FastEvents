@@ -185,7 +185,7 @@ app = FastEvents()
 rpc = RpcExtension(app)
 ```
 
-Compared with the historical `app.ex` style, this is clearer and works better with type inference.
+This explicit composition style is clearer and works better with type inference.
 
 ### 4. runtime complexity belongs in the bus
 
