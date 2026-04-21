@@ -66,20 +66,18 @@ Here is a slightly richer example that shows:
 
 - dependency injection
 - `event.ctx.publish()`
-- `pydantic` payload validation
+- `EventModel` payload validation
 
 ```python
 import asyncio
 
-from pydantic import BaseModel
-
-from fastevents import FastEvents, InMemoryBus, RuntimeEvent, dependency
+from fastevents import EventModel, FastEvents, InMemoryBus, RuntimeEvent, dependency
 
 app = FastEvents()
 bus = InMemoryBus()
 
 
-class WorldPayload(BaseModel):
+class WorldPayload(EventModel):
     text: str
 
 
@@ -115,7 +113,7 @@ What happens here:
 - the `hello` handler receives the result of `say_hello()` through dependency injection
 - `say_hello()` depends on the current `event` and returns `True` when the payload is not empty
 - the `hello` handler publishes a follow-up `world` event when the condition is met
-- the `world` handler validates the payload with a `pydantic` model and prints `world`
+- the `world` handler validates the payload with an `EventModel` and prints `world`
 
 ---
 
@@ -263,17 +261,18 @@ FastEvents supports structured parameter injection. You declare a handler signat
 Common forms:
 
 - `RuntimeEvent`: get the current event
-- `dict`: get the raw payload
-- `pydantic.BaseModel`: get validated structured payload
+- `pydantic.BaseModel`: get validated structured payload in compatibility mode
+- `EventModel`: recommended validated structured payload base
 
 Example:
 
 ```python
 from pydantic import BaseModel
-from fastevents import RuntimeEvent
+
+from fastevents import EventModel, RuntimeEvent
 
 
-class OrderCreated(BaseModel):
+class OrderCreated(EventModel):
     order_id: int
 
 
@@ -283,16 +282,22 @@ async def event_only(event: RuntimeEvent) -> None:
 
 
 @app.on("order.created")
-async def raw_payload(payload: dict) -> None:
+async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
     ...
+
+
+class LegacyOrderCreated(BaseModel):
+    order_id: int
 
 
 @app.on("order.created")
-async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
+async def compatible_typed_payload(data: LegacyOrderCreated) -> None:
     ...
 ```
 
-If `pydantic` validation fails, the current handler is treated as declining the event, and propagation may continue to a higher level.
+[`EventModel`](fastevents/models.py) is the recommended payload base. Plain `pydantic.BaseModel` remains supported for compatibility.
+
+If payload validation or any injection-stage dependency build fails, the current handler is treated as declining the event, and propagation may continue to a higher level.
 
 ---
 
@@ -318,10 +323,12 @@ Dependencies can themselves depend on:
 
 - the current event
 - `ctx`
-- payload injection
+- payload models
 - other dependencies
 
 Resolution is cached for one event dispatch, so multiple handlers handling the same event can reuse the same dependency result.
+
+For custom typed injection, define a static [`_provider()`](fastevents/subscribers.py:154) on your type and return a provider declared with [`dependency()`](fastevents/subscribers.py:63). FastEvents only keeps privileged typed injection for [`RuntimeEvent`](fastevents/events.py:82) and pydantic-based payload models.
 
 ---
 
@@ -336,14 +343,14 @@ from fastevents import SessionNotConsumed
 
 
 @app.on("user.lookup", level=0)
-async def primary(data: dict) -> None:
-    if data.get("source") == "legacy":
+async def primary(data: LegacyOrderCreated) -> None:
+    if data.order_id == -1:
         raise SessionNotConsumed()
 
 
 @app.on("user.lookup", level=1)
-async def fallback(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", **payload})
+async def fallback(event: RuntimeEvent, data: LegacyOrderCreated) -> None:
+    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", "order_id": data.order_id})
 ```
 
 ---
@@ -360,11 +367,70 @@ Example:
 
 ```python
 @app.on("order.created")
-async def handle(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.publish(tags="order.validated", payload=payload)
+async def handle(event: RuntimeEvent, data: OrderCreated) -> None:
+    await event.ctx.publish(tags="order.validated", payload={"order_id": data.order_id})
 ```
 
 This means handlers do not need to carry a direct bus reference, and runtime interaction stays behind a clear boundary.
+
+`RuntimeEvent` is the only runtime-side privileged typed injection surface. Higher-level capability objects should be expressed through dependencies or typed providers rather than new framework special cases.
+
+---
+
+## Debug Mode
+
+[`FastEvents`](fastevents/app.py:18) accepts `debug=True`:
+
+```python
+from fastevents import FastEvents
+
+app = FastEvents(debug=True)
+```
+
+Debug mode does not change propagation semantics. It only prints diagnostics for:
+
+- events flowing into the app
+- events published out of the app
+- subscriber matching and level propagation
+- absorbed injection-stage errors
+
+---
+
+## Serialization and Send Boundary
+
+FastEvents now treats the application boundary and the bus boundary differently.
+
+At the app boundary, [`FastEvents.publish()`](fastevents/app.py:83) and [`EventContext.publish()`](fastevents/events.py:123) accept richer Python values and normalize them before they enter the bus.
+
+At the bus boundary, [`StandardEvent`](fastevents/events.py:16) stores only scalar send values:
+
+- `None`
+- `bool`
+- `int`
+- `float`
+- `str`
+
+Application-facing values are encoded through [`encode_app_value()`](fastevents/events.py:55). The current supported inputs are:
+
+- scalar values
+- `list`
+- `tuple`
+- `dict[str, ...]`
+- dataclass instances
+- `pydantic.BaseModel`
+- [`EventModel`](fastevents/models.py:13)
+
+Normalization rules:
+
+- `tuple` is encoded as `{"tuple": [...]}` so the immutable intent survives transport
+- `dict` keys must be strings
+- dataclasses are converted with `asdict(...)`
+- pydantic models are converted with `model_dump(mode="json")`
+- non-scalar structured values are serialized to JSON strings before entering the bus
+
+When events are handled inside the app, [`RuntimeEventView.payload`](fastevents/events.py:197) and [`RuntimeEventView.meta`](fastevents/events.py:192) decode these values back into structured runtime forms.
+
+This keeps the bus contract minimal while preserving a convenient application programming model.
 
 ---
 

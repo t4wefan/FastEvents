@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, is_dataclass
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import time
 from typing import Any, Protocol
 from uuid import uuid4
+
+from pydantic import BaseModel
 
 from .subscription import TagInput, normalize_tags
 
@@ -20,6 +24,74 @@ class StandardEvent:
     payload: Any = None
 
 
+ScalarEventValue = None | bool | int | float | str
+
+
+def _is_bus_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, bool | int | float | str)
+
+
+def _normalize_json_compatible(value: Any) -> Any:
+    if _is_bus_scalar(value):
+        return value
+    if isinstance(value, BaseModel):
+        return _normalize_json_compatible(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _normalize_json_compatible(asdict(value))
+    if isinstance(value, tuple):
+        return {"tuple": [_normalize_json_compatible(item) for item in value]}
+    if isinstance(value, list):
+        return [_normalize_json_compatible(item) for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("event dict keys must be strings")
+            normalized[key] = _normalize_json_compatible(item)
+        return normalized
+    raise TypeError(f"value of type {type(value).__name__} is not event-serializable")
+
+
+def encode_app_value(value: Any) -> ScalarEventValue:
+    """Normalize app-facing values into bus-facing scalar payload/meta values."""
+
+    if _is_bus_scalar(value):
+        return value
+    normalized = _normalize_json_compatible(value)
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_event_value(value: Any) -> Any:
+    """Decode one bus-facing scalar into an app-facing structured value when possible."""
+
+    if isinstance(value, list):
+        return [decode_event_value(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {"tuple"} and isinstance(value["tuple"], list):
+            return tuple(decode_event_value(item) for item in value["tuple"])
+        return {key: decode_event_value(item) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return decode_event_value(decoded)
+
+
+def decode_event_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: decode_event_value(value) for key, value in meta.items()}
+
+
+def encode_event_meta(meta: Mapping[str, Any] | None) -> dict[str, ScalarEventValue]:
+    encoded: dict[str, ScalarEventValue] = {}
+    for key, value in dict(meta or {}).items():
+        if not isinstance(key, str):
+            raise TypeError("event meta keys must be strings")
+        encoded[key] = encode_app_value(value)
+    return encoded
+
+
 def new_event(
     *,
     tags: TagInput,
@@ -30,13 +102,13 @@ def new_event(
 ) -> StandardEvent:
     """Create a normalized ``StandardEvent`` with generated defaults."""
 
-    event_meta = dict(meta or {})
+    event_meta = encode_event_meta(meta)
     return StandardEvent(
         id=id or uuid4().hex,
         timestamp=time() if timestamp is None else timestamp,
         tags=normalize_tags(tags),
         meta=event_meta,
-        payload=payload,
+        payload=encode_app_value(payload),
     )
 
 
@@ -130,11 +202,11 @@ class RuntimeEventView:
 
     @property
     def meta(self) -> Mapping[str, Any]:
-        return self._event.meta
+        return decode_event_meta(self._event.meta)
 
     @property
     def payload(self) -> Any:
-        return self._event.payload
+        return decode_event_value(self._event.payload)
 
 
 def format_event_debug(event: StandardEvent | RuntimeEvent) -> str:

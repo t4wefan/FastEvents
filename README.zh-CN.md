@@ -66,20 +66,18 @@ async def hello(event: RuntimeEvent) -> None:
 
 - dependency 注入
 - `event.ctx.publish()`
-- `pydantic` payload 校验
+- `EventModel` payload 校验
 
 ```python
 import asyncio
 
-from pydantic import BaseModel
-
-from fastevents import FastEvents, InMemoryBus, RuntimeEvent, dependency
+from fastevents import EventModel, FastEvents, InMemoryBus, RuntimeEvent, dependency
 
 app = FastEvents()
 bus = InMemoryBus()
 
 
-class WorldPayload(BaseModel):
+class WorldPayload(EventModel):
     text: str
 
 
@@ -115,7 +113,7 @@ asyncio.run(main())
 - `hello` handler 不直接自己判断，而是通过 dependency 注入 `say_hello()` 的结果
 - `say_hello()` 依赖当前 `event`，只要 payload 不为空就返回 `True`
 - `hello` handler 在条件满足时继续发布一个 `world` 事件
-- `world` handler 用 `pydantic` 模型校验 payload，校验通过后打印 `world`
+- `world` handler 用 `EventModel` 校验 payload，校验通过后打印 `world`
 
 ---
 
@@ -263,17 +261,18 @@ FastEvents 支持结构化参数注入。你声明 handler 签名，框架负责
 常见注入方式：
 
 - `RuntimeEvent`：获取当前事件
-- `dict`：获取原始 payload
-- `pydantic.BaseModel`：获取校验后的结构化 payload
+- `pydantic.BaseModel`：获取兼容模式下的结构化 payload
+- `EventModel`：推荐使用的结构化 payload 基类
 
 示例：
 
 ```python
 from pydantic import BaseModel
-from fastevents import RuntimeEvent
+
+from fastevents import EventModel, RuntimeEvent
 
 
-class OrderCreated(BaseModel):
+class OrderCreated(EventModel):
     order_id: int
 
 
@@ -283,16 +282,22 @@ async def event_only(event: RuntimeEvent) -> None:
 
 
 @app.on("order.created")
-async def raw_payload(payload: dict) -> None:
+async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
     ...
+
+
+class LegacyOrderCreated(BaseModel):
+    order_id: int
 
 
 @app.on("order.created")
-async def typed_payload(event: RuntimeEvent, data: OrderCreated) -> None:
+async def compatible_typed_payload(data: LegacyOrderCreated) -> None:
     ...
 ```
 
-如果 `pydantic` 模型校验失败，当前 handler 会被视为放弃消费，事件仍然可以继续向更高 level 传播。
+[`EventModel`](fastevents/models.py) 是推荐的 payload 基类；原生 `pydantic.BaseModel` 仍然保留兼容支持。
+
+如果 payload 校验或依赖注入阶段构造失败，当前 handler 会被视为放弃消费，事件仍然可以继续向更高 level 传播。
 
 ---
 
@@ -318,10 +323,12 @@ dependency 还可以继续依赖：
 
 - 当前 event
 - `ctx`
-- payload 注入
+- payload model
 - 其他 dependency
 
 解析结果会在当前事件的一次 dispatch 中缓存，因此同一事件上的多个 handler 可以复用同一个 dependency 结果。
+
+如果你想做自定义类型注入，不要继续给框架增加特判。给类型定义一个静态 [`_provider()`](fastevents/subscribers.py:154)，并返回一个由 [`dependency()`](fastevents/subscribers.py:63) 声明的 provider。FastEvents 只保留 [`RuntimeEvent`](fastevents/events.py:82) 和基于 pydantic 的 payload model 这两类特权类型注入。
 
 ---
 
@@ -336,14 +343,14 @@ from fastevents import SessionNotConsumed
 
 
 @app.on("user.lookup", level=0)
-async def primary(data: dict) -> None:
-    if data.get("source") == "legacy":
+async def primary(data: LegacyOrderCreated) -> None:
+    if data.order_id == -1:
         raise SessionNotConsumed()
 
 
 @app.on("user.lookup", level=1)
-async def fallback(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", **payload})
+async def fallback(event: RuntimeEvent, data: LegacyOrderCreated) -> None:
+    await event.ctx.publish(tags="user.lookup.fallback", payload={"path": "fallback", "order_id": data.order_id})
 ```
 
 ---
@@ -360,11 +367,70 @@ async def fallback(event: RuntimeEvent, payload: dict) -> None:
 
 ```python
 @app.on("order.created")
-async def handle(event: RuntimeEvent, payload: dict) -> None:
-    await event.ctx.publish(tags="order.validated", payload=payload)
+async def handle(event: RuntimeEvent, data: OrderCreated) -> None:
+    await event.ctx.publish(tags="order.validated", payload={"order_id": data.order_id})
 ```
 
 这样 handler 不需要手动持有 bus 引用，和 runtime 的交互边界也更集中。
+
+`RuntimeEvent` 是唯一保留特权的 runtime 类型注入面；更高层能力对象应该通过 dependency 或 typed provider 表达，而不是继续扩展框架特判。
+
+---
+
+## Debug 模式
+
+[`FastEvents`](fastevents/app.py:18) 支持 `debug=True`：
+
+```python
+from fastevents import FastEvents
+
+app = FastEvents(debug=True)
+```
+
+Debug 模式不会改变传播语义，只会输出这些诊断信息：
+
+- 流入 app 的事件
+- 从 app 发出的事件
+- subscriber 的匹配与 level 传播轨迹
+- 被吸收的注入阶段错误
+
+---
+
+## 序列化与发送边界
+
+FastEvents 现在明确区分 app 边界与 bus 边界。
+
+在 app 边界，[`FastEvents.publish()`](fastevents/app.py:83) 和 [`EventContext.publish()`](fastevents/events.py:123) 可以接收更丰富的 Python 值，并在进入 bus 前做标准化。
+
+在 bus 边界，[`StandardEvent`](fastevents/events.py:16) 只保存最小发送值：
+
+- `None`
+- `bool`
+- `int`
+- `float`
+- `str`
+
+app 层通过 [`encode_app_value()`](fastevents/events.py:55) 把更丰富的对象编码成 bus 可发送值。目前支持：
+
+- 标量值
+- `list`
+- `tuple`
+- `dict[str, ...]`
+- dataclass 实例
+- `pydantic.BaseModel`
+- [`EventModel`](fastevents/models.py:13)
+
+当前标准化规则：
+
+- `tuple` 会编码成 `{"tuple": [...]}`，这样可以保留不可变语义
+- `dict` 的 key 必须是字符串
+- dataclass 通过 `asdict(...)` 转换
+- pydantic model 通过 `model_dump(mode="json")` 转换
+- 非标量结构最终会在进入 bus 前编码成 JSON 字符串
+
+事件进入 app 内部处理时，[`RuntimeEventView.payload`](fastevents/events.py:197) 和 [`RuntimeEventView.meta`](fastevents/events.py:192) 会再把这些值解码回运行时结构。
+
+这样 bus 合同保持最小，而 app 编程体验仍然保持友好。
 
 ---
 

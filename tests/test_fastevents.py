@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import io
 import unittest
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
@@ -26,6 +27,11 @@ class LookupReply(EventModel):
 
 class FallbackPayload(EventModel):
     raw: str
+
+
+class EnvelopeModel(EventModel):
+    order_id: int
+    note: str
 
 
 class LookupRequest(BaseModel):
@@ -55,6 +61,12 @@ class BrokenDependency:
             raise RuntimeError("boom")
 
         return provider
+
+
+@dataclass
+class AuditEnvelope:
+    order_id: int
+    note: str
 
 
 class FastEventsTests(unittest.IsolatedAsyncioTestCase):
@@ -349,6 +361,41 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("incoming", debug_output)
         self.assertIn("dispatch level=0", debug_output)
         self.assertIn("absorbed injection error", debug_output)
+
+    async def test_tuple_payload_round_trip_preserves_tuple_marker(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+
+        await bus.astart(app)
+        try:
+            async with app.listen("tuple.payload", level=-1) as stream:
+                await app.publish(tags="tuple.payload", payload=(1, "two", True))
+                event = await asyncio.wait_for(stream.get(), timeout=1)
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(event.payload, (1, "two", True))
+
+    async def test_dataclass_payload_is_json_compatible_on_receive(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[dict[str, Any]] = []
+
+        @app.on("dataclass.payload")
+        async def handle(data: EnvelopeModel) -> None:
+            seen.append(data.model_dump())
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="dataclass.payload", payload=AuditEnvelope(order_id=7, note="ok"))
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, [{"order_id": 7, "note": "ok"}])
 
     async def test_rpc_request_returns_all_replies(self) -> None:
         app = FastEvents()
