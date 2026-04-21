@@ -30,6 +30,17 @@
 - [`start()`](fastevents/bus.py:132)
 - [`stop()`](fastevents/bus.py:158)
 
+同步 [`start()`](fastevents/bus.py:132) 不再等待“外部某个事件循环碰巧来驱动它”。
+
+现在它会启动并维护一个专属后台事件循环线程，所以同步启动后的 bus 立即拥有自己的运行时归属。
+
+在这种模式下，你可以使用：
+
+- [`sync_publish()`](fastevents/bus.py:205)
+- [`sync_send()`](fastevents/bus.py:223)
+
+通过跨线程桥接把事件送进这个专属运行时。
+
 ### 阻塞式运行
 
 - [`run()`](fastevents/bus.py:115)

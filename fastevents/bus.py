@@ -93,6 +93,24 @@ class Bus(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def sync_publish(
+        self,
+        *,
+        tags: TagInput,
+        payload: Any = None,
+        meta: dict[str, object] | None = None,
+        id: str | None = None,
+        timestamp: float | None = None,
+    ) -> StandardEvent:
+        """Synchronously publish one event through the running runtime loop."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def sync_send(self, event: StandardEvent) -> None:
+        """Synchronously send one pre-built event through the running runtime loop."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def ingest(self, event: StandardEvent) -> None:
         """Process an already-built event inside the local runtime boundary."""
         raise NotImplementedError
@@ -104,6 +122,7 @@ class InMemoryBus(Bus):
         self._app: FastEvents | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_id: int | None = None
+        self._runtime_thread: threading.Thread | None = None
         self._queue: asyncio.Queue[StandardEvent | None] | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -132,26 +151,53 @@ class InMemoryBus(Bus):
     def start(self, app: FastEvents, *, startup_event: StandardEvent | None = None) -> None:
         """Enter started state and bind the dispatcher runtime publisher.
 
-        Startup does not dispatch the optional lifecycle event immediately when
-        called from sync code; it is flushed once the runtime loop is ready.
+        Sync startup owns a dedicated background event loop thread.
         """
-        if self._started:
-            raise BusAlreadyStartedError("bus is already started")
-        self._app = app
-        self._started = True
-        self._accepting = True
-        self._stopping = False
-        self._loop = None
-        self._loop_thread_id = None
-        self._queue = None
-        self._worker_task = None
-        self._pending_startup_event = startup_event
-        self._app.dispatcher.bind_runtime_publisher(self)
-        self._app._bind_runtime_bus(self)  # type: ignore[attr-defined]
+        self._bind_started_state(app, startup_event=startup_event)
+        ready = threading.Event()
+        startup_error: list[BaseException] = []
+
+        def runner() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._loop_thread_id = threading.get_ident()
+
+            async def init_runtime() -> None:
+                try:
+                    await self._ensure_runtime_ready()
+                    await self._flush_pending_startup_event()
+                except BaseException as exc:  # pragma: no cover - catastrophic startup path
+                    startup_error.append(exc)
+                finally:
+                    ready.set()
+
+            loop.create_task(init_runtime())
+            try:
+                loop.run_forever()
+            finally:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+        self._runtime_thread = threading.Thread(target=runner, name="FastEventsInMemoryBus", daemon=True)
+        self._runtime_thread.start()
+        ready.wait()
+        if startup_error:
+            self._runtime_thread = None
+            self._started = False
+            self._accepting = False
+            self._stopping = False
+            self._loop = None
+            self._loop_thread_id = None
+            raise startup_error[0]
 
     async def astart(self, app: FastEvents, *, startup_event: StandardEvent | None = None) -> None:
         """Async startup that prepares queue/worker and flushes startup event."""
-        self.start(app, startup_event=startup_event)
+        self._bind_started_state(app, startup_event=startup_event)
         await self._ensure_runtime_ready()
         await self._flush_pending_startup_event()
 
@@ -166,6 +212,10 @@ class InMemoryBus(Bus):
                 raise RuntimeError("bus.stop() cannot block from the event loop thread; call it from sync code or asyncio.to_thread")
             future = asyncio.run_coroutine_threadsafe(self._stop_async(shutdown_event=shutdown_event), loop)
             future.result()
+            if self._runtime_thread is not None:
+                loop.call_soon_threadsafe(loop.stop)
+                self._runtime_thread.join()
+                self._runtime_thread = None
             return
 
         asyncio.run(self._stop_async(shutdown_event=shutdown_event))
@@ -201,6 +251,27 @@ class InMemoryBus(Bus):
         self._loop_thread_id = None
         if self._app is not None:
             self._app._bind_runtime_bus(None)  # type: ignore[attr-defined]
+
+    def sync_publish(
+        self,
+        *,
+        tags: TagInput,
+        payload: Any = None,
+        meta: dict[str, object] | None = None,
+        id: str | None = None,
+        timestamp: float | None = None,
+    ) -> StandardEvent:
+        loop = self._require_running_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self.publish(tags=tags, payload=payload, meta=meta, id=id, timestamp=timestamp),
+            loop,
+        )
+        return future.result()
+
+    def sync_send(self, event: StandardEvent) -> None:
+        loop = self._require_running_loop()
+        future = asyncio.run_coroutine_threadsafe(self.send(event), loop)
+        future.result()
 
     async def publish(
         self,
@@ -295,6 +366,22 @@ class InMemoryBus(Bus):
         self._pending_startup_event = None
         await self.send(event)
 
+    def _bind_started_state(self, app: FastEvents, *, startup_event: StandardEvent | None) -> None:
+        if self._started:
+            raise BusAlreadyStartedError("bus is already started")
+        self._app = app
+        self._started = True
+        self._accepting = True
+        self._stopping = False
+        self._loop = None
+        self._loop_thread_id = None
+        self._queue = None
+        self._worker_task = None
+        self._tasks.clear()
+        self._pending_startup_event = startup_event
+        self._app.dispatcher.bind_runtime_publisher(self)
+        self._app._bind_runtime_bus(self)  # type: ignore[attr-defined]
+
     def _ensure_started(self) -> None:
         if not self._started or not self._accepting or self._app is None:
             raise BusNotStartedError("bus has not been started")
@@ -319,6 +406,12 @@ class InMemoryBus(Bus):
         if self._app is None:
             raise BusNotStartedError("bus has not been started")
         return self._app
+
+    def _require_running_loop(self) -> asyncio.AbstractEventLoop:
+        loop = self._loop
+        if loop is None or not loop.is_running() or not self._started:
+            raise BusNotStartedError("bus runtime loop is not available")
+        return loop
 
     def _require_queue(self) -> asyncio.Queue[StandardEvent | None]:
         if self._queue is None:
