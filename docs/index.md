@@ -20,7 +20,7 @@
 - [`Bus`](fastevents/bus.py:21)
 - [`Dispatcher`](fastevents/dispatcher.py:33)
 - [`StandardEvent`](fastevents/events.py:16)
-- [`RuntimeEvent`](fastevents/events.py:101)
+- [`RuntimeEvent`](fastevents/events.py:173)
 
 ### 3. 事件与传播
 

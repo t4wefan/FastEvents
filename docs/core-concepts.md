@@ -48,7 +48,7 @@ FastEvents 可以分成三层：
 - `meta`
 - `payload`
 
-### [`RuntimeEvent`](fastevents/events.py:101)
+### [`RuntimeEvent`](fastevents/events.py:173)
 
 这是 handler 执行期的运行时视图。
 
@@ -80,7 +80,7 @@ FastEvents 可以分成三层：
 [`Dispatcher`](fastevents/dispatcher.py:33) 的职责不是 transport，而是语义执行：
 
 - 匹配 subscriber
-- 构建 [`RuntimeEventView`](fastevents/events.py:173)
+- 构建 [`RuntimeEvent`](fastevents/events.py:173)
 - 创建依赖作用域
 - 按 level 执行传播
 

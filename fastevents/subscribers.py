@@ -215,13 +215,6 @@ class _DependencyResolver:
                 event_param_used = True
                 continue
 
-            if _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation):
-                if payload_param_used:
-                    raise InjectionError("only one payload parameter is allowed")
-                kwargs[parameter.name] = self._resolve_payload(annotation)
-                payload_param_used = True
-                continue
-
             annotation_provider = _get_annotation_provider(annotation)
             if annotation_provider is not None:
                 if annotation is EventContext:
@@ -229,6 +222,13 @@ class _DependencyResolver:
                         raise InjectionError("only one context parameter is allowed")
                     ctx_param_used = True
                 kwargs[parameter.name] = await self.resolve_dependency(annotation_provider)
+                continue
+
+            if _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation):
+                if payload_param_used:
+                    raise InjectionError("only one payload parameter is allowed")
+                kwargs[parameter.name] = self._resolve_payload(annotation)
+                payload_param_used = True
                 continue
 
             if parameter.default is inspect.Signature.empty:

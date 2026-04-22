@@ -57,7 +57,7 @@ asyncio.run(main())
 - 把事件送进 dispatcher
 - 管理生命周期
 
-### [`RuntimeEvent`](fastevents/events.py:101)
+### [`RuntimeEvent`](fastevents/events.py:173)
 
 handler 看到的不是裸 payload，而是运行时事件视图。你通常会从它拿到：
 

@@ -13,7 +13,7 @@ FastEvents 的注入不是重量级容器，而是轻量、显式、可推导的
 
 ### 运行时特权类型
 
-- [`RuntimeEvent`](fastevents/events.py:101)
+- [`RuntimeEvent`](fastevents/events.py:173)
 
 ### payload 快速注入类型
 

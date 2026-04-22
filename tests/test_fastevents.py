@@ -35,6 +35,18 @@ class EnvelopeModel(EventModel):
     note: str
 
 
+class ProviderFirstModel(EventModel):
+    value: str
+
+    @staticmethod
+    def _provider():
+        @dependency
+        def provider(event: RuntimeEvent) -> ProviderFirstModel:
+            return ProviderFirstModel(value=f"provider:{event.id}")
+
+        return provider
+
+
 class LookupRequest(BaseModel):
     user_id: int | None = None
     ok: bool | None = None
@@ -435,6 +447,26 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
                 await bus.astop()
 
         self.assertEqual(seen, [{"a": 1, "b": True}])
+
+    async def test_provider_overrides_basemodel_payload_injection(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("provider.first")
+        async def handle(data: ProviderFirstModel) -> None:
+            seen.append(data.value)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="provider.first", payload={"value": "payload"})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("provider:"))
 
 
 class FastEventsSyncBusTests(unittest.TestCase):
