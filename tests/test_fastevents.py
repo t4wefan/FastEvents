@@ -6,7 +6,7 @@ import io
 import threading
 import unittest
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
@@ -55,6 +55,34 @@ class ClassMethodProviderModel(EventModel):
         @dependency
         def provider(event: RuntimeEvent) -> ClassMethodProviderModel:
             return cls(value=f"cls:{event.id}")
+
+        return provider
+
+
+class ProviderInjectedEventModel(EventModel):
+    value: str
+
+    @classmethod
+    def _provider(cls):
+        @dependency
+        def provider(payload: dict, event: RuntimeEvent) -> ProviderInjectedEventModel:
+            return cls(value=f"{payload['value']}:{event.id}")
+
+        return provider
+
+
+class StableProviderModel(EventModel):
+    value: str
+
+    provider_calls: ClassVar[int] = 0
+
+    @classmethod
+    def _provider(cls):
+        cls.provider_calls += 1
+
+        @dependency
+        def provider(event: RuntimeEvent) -> StableProviderModel:
+            return cls(value=f"stable:{event.id}")
 
         return provider
 
@@ -522,6 +550,48 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
                 await bus.astop()
 
         self.assertEqual(seen, ["from-payload"])
+
+    async def test_eventmodel_custom_provider_uses_dependency_resolution(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("eventmodel.custom_provider")
+        async def handle(data: ProviderInjectedEventModel) -> None:
+            seen.append(data.value)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="eventmodel.custom_provider", payload={"value": "from-provider"})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("from-provider:"))
+
+    async def test_annotation_provider_is_cached_per_annotation_type(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[tuple[str, str]] = []
+        StableProviderModel.provider_calls = 0
+
+        @app.on("provider.cache")
+        async def handle(first: StableProviderModel, second: StableProviderModel) -> None:
+            seen.append((first.value, second.value))
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="provider.cache", payload={})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], seen[0][1])
+        self.assertEqual(StableProviderModel.provider_calls, 1)
 
 
 class FastEventsSyncBusTests(unittest.TestCase):

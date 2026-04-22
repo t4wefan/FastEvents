@@ -76,6 +76,67 @@ def _is_quick_payload_annotation(annotation: Any) -> bool:
     return annotation in {dict, list, tuple, str, int, float, bool, bytes}
 
 
+def _annotation_provider_owner(annotation: Any) -> type[Any] | None:
+    if not inspect.isclass(annotation):
+        return None
+    for cls in annotation.__mro__:
+        if "_provider" in cls.__dict__:
+            return cls
+    return None
+
+
+def _has_custom_annotation_provider(annotation: Any) -> bool:
+    owner = _annotation_provider_owner(annotation)
+    if owner is None:
+        return False
+
+    from .models import EventModel
+
+    return owner is not EventModel
+
+
+@dataclass(slots=True, frozen=True)
+class ParameterResolution:
+    kind: str
+    annotation: Any = inspect.Signature.empty
+    dependency: Dependency[Any] | None = None
+
+
+_ANNOTATION_PROVIDER_CACHE: dict[type[Any], Dependency[Any]] = {}
+
+
+def _resolve_parameter(parameter: inspect.Parameter, type_hints: dict[str, Any]) -> ParameterResolution:
+    if parameter.kind not in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    ):
+        raise InjectionError("varargs are not supported")
+
+    if isinstance(parameter.default, DependencyCall):
+        return ParameterResolution(kind="dependency_call", dependency=parameter.default.dependency)
+
+    annotation = type_hints.get(parameter.name, parameter.annotation)
+    if annotation is inspect.Signature.empty:
+        if parameter.default is inspect.Signature.empty:
+            raise InjectionError("required parameters must be injectable")
+        return ParameterResolution(kind="default")
+
+    if _is_runtime_event_annotation(annotation):
+        return ParameterResolution(kind="event", annotation=annotation)
+
+    annotation_provider = _get_annotation_provider(annotation)
+    if annotation_provider is not None:
+        return ParameterResolution(kind="annotation_provider", annotation=annotation, dependency=annotation_provider)
+
+    if _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation):
+        return ParameterResolution(kind="payload", annotation=annotation)
+
+    if parameter.default is inspect.Signature.empty:
+        raise InjectionError(f"unsupported required parameter: {parameter.name}")
+    return ParameterResolution(kind="default", annotation=annotation)
+
+
 class HandlerSubscriber:
     """Handler-backed subscriber with lightweight dependency resolution."""
 
@@ -128,27 +189,7 @@ class HandlerSubscriber:
         signature = inspect.signature(callback)
         type_hints = get_type_hints(callback)
         for parameter in signature.parameters.values():
-            if parameter.kind not in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            ):
-                raise InjectionError("varargs are not supported")
-
-            if isinstance(parameter.default, DependencyCall):
-                continue
-
-            annotation = type_hints.get(parameter.name, parameter.annotation)
-            if annotation is inspect.Signature.empty:
-                if parameter.default is inspect.Signature.empty:
-                    raise InjectionError("required parameters must be injectable")
-                continue
-
-            if _is_runtime_event_annotation(annotation) or _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation) or _get_annotation_provider(annotation) is not None:
-                continue
-
-            if parameter.default is inspect.Signature.empty:
-                raise InjectionError(f"unsupported required parameter: {parameter.name}")
+            _resolve_parameter(parameter, type_hints)
 
 
 def _is_runtime_event_annotation(annotation: Any) -> bool:
@@ -158,6 +199,9 @@ def _is_runtime_event_annotation(annotation: Any) -> bool:
 def _get_annotation_provider(annotation: Any) -> Dependency[Any] | None:
     if not inspect.isclass(annotation):
         return None
+    cached = _ANNOTATION_PROVIDER_CACHE.get(annotation)
+    if cached is not None:
+        return cached
     raw_provider = None
     for cls in annotation.__mro__:
         candidate = cls.__dict__.get("_provider")
@@ -173,8 +217,6 @@ def _get_annotation_provider(annotation: Any) -> Dependency[Any] | None:
     else:
         raise InjectionError(f"{annotation.__name__}._provider must be a staticmethod or classmethod")
 
-    if issubclass(annotation, BaseModel) and raw_provider is not annotation.__dict__.get("_provider"):
-        return None
     signature = inspect.signature(provider_factory)
     positional_parameters = [
         parameter
@@ -186,6 +228,7 @@ def _get_annotation_provider(annotation: Any) -> Dependency[Any] | None:
     provider = provider_factory()
     if not isinstance(provider, Dependency):
         raise InjectionError(f"{annotation.__name__}._provider must return a dependency")
+    _ANNOTATION_PROVIDER_CACHE[annotation] = provider
     return provider
 
 
@@ -202,48 +245,36 @@ class _DependencyResolver:
         ctx_param_used = False
 
         for parameter in signature.parameters.values():
-            if parameter.kind not in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            ):
-                raise InjectionError("varargs are not supported")
+            resolution = _resolve_parameter(parameter, type_hints)
 
-            if isinstance(parameter.default, DependencyCall):
-                kwargs[parameter.name] = await self.resolve_dependency(parameter.default.dependency)
+            if resolution.kind == "dependency_call":
+                kwargs[parameter.name] = await self.resolve_dependency(cast(Dependency[Any], resolution.dependency))
                 continue
 
-            annotation = type_hints.get(parameter.name, parameter.annotation)
-            if annotation is inspect.Signature.empty:
-                if parameter.default is inspect.Signature.empty:
-                    raise InjectionError("required parameters must be injectable")
+            if resolution.kind == "default":
                 continue
 
-            if _is_runtime_event_annotation(annotation):
+            if resolution.kind == "event":
                 if event_param_used:
                     raise InjectionError("only one event parameter is allowed")
                 kwargs[parameter.name] = self._scope.event
                 event_param_used = True
                 continue
 
-            annotation_provider = _get_annotation_provider(annotation)
-            if annotation_provider is not None:
-                if annotation is EventContext:
+            if resolution.kind == "annotation_provider":
+                if resolution.annotation is EventContext:
                     if ctx_param_used:
                         raise InjectionError("only one context parameter is allowed")
                     ctx_param_used = True
-                kwargs[parameter.name] = await self.resolve_dependency(annotation_provider)
+                kwargs[parameter.name] = await self.resolve_dependency(cast(Dependency[Any], resolution.dependency))
                 continue
 
-            if _is_basemodel_type(annotation) or _is_quick_payload_annotation(annotation):
+            if resolution.kind == "payload":
                 if payload_param_used:
                     raise InjectionError("only one payload parameter is allowed")
-                kwargs[parameter.name] = self._resolve_payload(annotation)
+                kwargs[parameter.name] = self._resolve_payload(resolution.annotation)
                 payload_param_used = True
                 continue
-
-            if parameter.default is inspect.Signature.empty:
-                raise InjectionError(f"unsupported required parameter: {parameter.name}")
 
         return kwargs
 
@@ -289,6 +320,10 @@ class _DependencyResolver:
             return payload
 
         if _is_basemodel_type(annotation):
+            if _has_custom_annotation_provider(annotation):
+                raise InjectionError(
+                    f"payload model {annotation.__name__} declares a custom provider and must resolve through provider injection"
+                )
             return annotation.model_validate(payload)
 
         raise InjectionError("unsupported payload annotation")
