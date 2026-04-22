@@ -1,6 +1,6 @@
 [project]
 name = "fastevents"
-version = "0.6.0"
+version = "0.7.0"
 description = "Lightweight asyncio event framework with layered propagation"
 readme = "README.md"
 requires-python = ">=3.12"
