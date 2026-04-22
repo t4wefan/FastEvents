@@ -47,6 +47,22 @@ class ProviderFirstModel(EventModel):
         return provider
 
 
+class ClassMethodProviderModel(EventModel):
+    value: str
+
+    @classmethod
+    def _provider(cls):
+        @dependency
+        def provider(event: RuntimeEvent) -> ClassMethodProviderModel:
+            return cls(value=f"cls:{event.id}")
+
+        return provider
+
+
+class AutoPayload(EventModel):
+    value: str
+
+
 class LookupRequest(BaseModel):
     user_id: int | None = None
     ok: bool | None = None
@@ -467,6 +483,45 @@ class FastEventsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(seen), 1)
         self.assertTrue(seen[0].startswith("provider:"))
+
+    async def test_classmethod_provider_is_supported(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("provider.classmethod")
+        async def handle(data: ClassMethodProviderModel) -> None:
+            seen.append(data.value)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="provider.classmethod", payload={"value": "payload"})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("cls:"))
+
+    async def test_eventmodel_default_provider_constructs_subclass(self) -> None:
+        app = FastEvents()
+        bus = InMemoryBus()
+        seen: list[str] = []
+
+        @app.on("eventmodel.default")
+        async def handle(data: AutoPayload) -> None:
+            seen.append(data.value)
+
+        await bus.astart(app)
+        try:
+            await app.publish(tags="eventmodel.default", payload={"value": "from-payload"})
+            await bus.astop()
+        finally:
+            if bus._started:  # type: ignore[attr-defined]
+                await bus.astop()
+
+        self.assertEqual(seen, ["from-payload"])
 
 
 class FastEventsSyncBusTests(unittest.TestCase):

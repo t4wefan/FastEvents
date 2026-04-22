@@ -158,12 +158,23 @@ def _is_runtime_event_annotation(annotation: Any) -> bool:
 def _get_annotation_provider(annotation: Any) -> Dependency[Any] | None:
     if not inspect.isclass(annotation):
         return None
-    raw_provider = annotation.__dict__.get("_provider")
+    raw_provider = None
+    for cls in annotation.__mro__:
+        candidate = cls.__dict__.get("_provider")
+        if candidate is not None:
+            raw_provider = candidate
+            break
     if raw_provider is None:
         return None
-    if not isinstance(raw_provider, staticmethod):
-        raise InjectionError(f"{annotation.__name__}._provider must be a staticmethod")
-    provider_factory = raw_provider.__get__(None, annotation)
+    if isinstance(raw_provider, classmethod):
+        provider_factory = raw_provider.__get__(annotation, annotation)
+    elif isinstance(raw_provider, staticmethod):
+        provider_factory = raw_provider.__get__(None, annotation)
+    else:
+        raise InjectionError(f"{annotation.__name__}._provider must be a staticmethod or classmethod")
+
+    if issubclass(annotation, BaseModel) and raw_provider is not annotation.__dict__.get("_provider"):
+        return None
     signature = inspect.signature(provider_factory)
     positional_parameters = [
         parameter
