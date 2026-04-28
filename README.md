@@ -27,7 +27,7 @@ uv add fastevents
 ```
 
 
-The current implementation targets Python `3.12+` and ships with an in-memory `InMemoryBus`.
+The current implementation targets Python `3.10+` and ships with an in-memory `InMemoryBus`.
 
 ---
 
